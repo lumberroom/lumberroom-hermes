@@ -30,18 +30,21 @@ through the same tools; the plugin carries no cloud-specific code path (spec
 
 ## Install
 
-Drop or symlink this directory into `~/.hermes/plugins/lumberroom`:
+From a release, into the directory Hermes loads providers from:
 
 ```bash
-ln -s /path/to/lumberroom-hermes ~/.hermes/plugins/lumberroom
+git clone --depth 1 --branch v1.0.0 https://github.com/lumberroom/lumberroom-hermes \
+  ~/.hermes/plugins/lumberroom
+hermes memory setup lumberroom
 ```
 
 Hermes loads a directory provider from `<dir>/__init__.py` and finds `cli.py` in the same place
-(spec §3). This is also how a Hermes catalog install lands once the plugin is listed there.
+(spec §3). A Hermes plugin-catalog install, `hermes plugins install lumberroom`, lands the same way
+once the catalog lists the plugin. A symlink to a working copy works for development.
 
-`pip install lumberroom-hermes` is for an owner-managed Hermes build, such as Nix, where Hermes's
-own docs say not to pip-inject into a package-manager-managed install. Available after the first
-release; not yet published (spec §2 decision 3, §13).
+An owner-managed Hermes build, such as Nix, where Hermes's own docs say not to pip-inject into a
+package-manager-managed install, takes the wheel instead: each GitHub release attaches it, and
+`pip install lumberroom-hermes` works once the package is on PyPI.
 
 ## Setup
 
@@ -180,7 +183,6 @@ reaches disk after the caller who asked for it stops waiting (`bridge.py:_shutdo
 - `hermes lumberroom setup` as a non-interactive command. An integration script writes `config.yaml`
   directly instead.
 - A GitHub Actions job for the plugin.
-- PyPI publication and the Hermes plugin-catalog PR.
 
 ## Development
 

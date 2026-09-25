@@ -5,6 +5,8 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-25
+
 ### Added
 
 - **The lumberroom memory provider for Hermes Agent.** Recall through Hermes's `prefetch` hook on
