@@ -31,7 +31,7 @@ Source = "https://github.com/the-cybersapien/lumberroom/tree/main/client/hermes"
 # the wheel maps the same files under lumberroom_hermes/.
 [tool.hatch.build.targets.wheel]
 only-include = [
-  "__init__.py", "auth.py", "bridge.py", "cli.py", "config.py", "gate.py", "importer.py",
+  "__init__.py", "_version.py", "auth.py", "bridge.py", "cli.py", "config.py", "gate.py", "importer.py",
   "plugin.yaml", "provider.py", "recall.py", "schemas.py", "tokens.py", "tools_snapshot.json",
   "wizard.py",
 ]

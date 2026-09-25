@@ -4,7 +4,7 @@ Hermes picks this directory out by the text register_memory_provider in this fil
 imports anything, so the call below has to stay spelled out here.
 """
 
-__version__ = "0.1.0"
+from ._version import __version__
 
 
 def register(ctx) -> None:
