@@ -189,6 +189,9 @@ reaches disk after the caller who asked for it stops waiting (`bridge.py:_shutdo
 The plugin talks to the [lumberroom engine](https://github.com/lumberroom/lumberroom) over MCP and
 ships on its own release cycle. Tags are `vX.Y.Z` in this repository.
 
+CI runs the suite on Python 3.14 against Hermes at `fdec926e`, because Hermes declares 13 of its core
+dependencies for 3.14 and up only. The code parses as Python 3.11, and no job runs it there.
+
 ```bash
 python3.14 -m venv .venv-hermes-plugin
 .venv-hermes-plugin/bin/pip install -e /path/to/hermes-agent[mcp]   # Hermes refuses a wheel build
