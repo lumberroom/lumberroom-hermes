@@ -5,6 +5,17 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-26
+
+### Fixed
+
+- **A token refresh answered with a 5xx no longer keeps the refresh token.** The engine spends the
+  refresh token before the steps that can still fail with a 500, and a proxy can answer 5xx after
+  the engine answered, so presenting the token again could trip the engine's replay check and
+  revoke the whole sign-in on every machine. The plugin now drops it; the live access token serves
+  until it expires, then `hermes lumberroom login` signs in again. A refresh that never connected
+  still keeps the token.
+
 ## [1.0.0] - 2026-09-25
 
 ### Added

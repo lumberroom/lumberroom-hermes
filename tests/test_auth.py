@@ -425,22 +425,24 @@ def test_the_fence_is_released_before_the_request_once_the_pair_is_refreshed(her
     assert log == ["fence in", "fence out", "body"]
 
 
-def test_a_token_endpoint_outage_on_an_expired_pair_is_refresh_unavailable_until_it_recovers(hermes_home, monkeypatch):
+def test_a_refresh_answered_5xx_drops_the_refresh_token_and_asks_for_sign_in(hermes_home, monkeypatch):
+    # The engine may have spent the token before it answered, so presenting it again risks the
+    # replay that revokes the family.
     handle, server = _oauth_with_expiry(hermes_home, monkeypatch, seconds_left=-5)
     server.token_statuses = [502]
-    with pytest.raises(auth_mod.RefreshUnavailable):
-        asyncio.run(_enter(handle))
-    # The SDK clears its tokens on a failed refresh. The guard reseeds them from the file, so the
-    # next call refreshes instead of falling into the browser flow.
-    assert handle.httpx_auth().context.current_tokens.refresh_token == "rt-1"
-    assert asyncio.run(_enter(handle)) == "at-2"
-    assert not server.family_revoked
+    for _ in range(2):
+        with pytest.raises(LoginRequired):
+            asyncio.run(_enter(handle))
+    assert "refresh_token" not in _stored(hermes_home).tokens
+    assert server.presented == ["rt-1"] and not server.family_revoked
 
 
-def test_a_token_endpoint_outage_inside_the_skew_window_lets_the_request_use_the_live_token(hermes_home, monkeypatch):
+def test_a_refresh_answered_5xx_inside_the_skew_window_keeps_serving_the_live_token(hermes_home, monkeypatch):
     handle, server = _oauth_with_expiry(hermes_home, monkeypatch, seconds_left=30)
     server.token_statuses = [503]
     assert asyncio.run(_enter(handle)) == "at-1"
+    assert asyncio.run(_enter(handle)) == "at-1"
+    assert "refresh_token" not in _stored(hermes_home).tokens
 
 
 def test_a_refused_refresh_is_login_required_and_is_not_presented_again(hermes_home, monkeypatch):
@@ -792,7 +794,7 @@ def test_two_bridges_on_one_profile_refresh_the_pair_once(hermes_home, monkeypat
     assert server.presented == ["rt-1"]
 
 
-def test_a_token_endpoint_outage_through_the_bridge_is_unreachable_then_recovers(hermes_home, monkeypatch):
+def test_a_refresh_answered_5xx_through_the_bridge_reports_login_required(hermes_home, monkeypatch):
     server = _seed(hermes_home, monkeypatch, -5)
     server.token_statuses = [502]
     b = _bridge(hermes_home, server)
@@ -800,7 +802,8 @@ def test_a_token_endpoint_outage_through_the_bridge_is_unreachable_then_recovers
         kinds = [b.call("memory_search", {"query": "q"}, invocation="hook", timeout=5).kind for _ in range(2)]
     finally:
         b.close()
-    assert kinds == ["unreachable", "ok"]
+    assert kinds == ["login_required", "login_required"]
+    assert not server.family_revoked
 
 
 def test_closing_the_bridge_mid_refresh_lands_the_rotated_pair_for_the_next_process(hermes_home, monkeypatch):

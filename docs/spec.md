@@ -271,8 +271,13 @@ forces a refresh may perform the grant itself; it does so inside the held fence.
 
 Failures, as implemented and pinned by unit tests (the gate's step 13 covers the success path):
 
-- The token endpoint answers 5xx or cannot be reached: `RefreshUnavailable`, reported as
-  unreachable. Inside the skew window the still-live access token carries the call instead.
+- The token endpoint cannot be reached, so the grant never left this machine: `RefreshUnavailable`,
+  reported as unreachable. Inside the skew window the still-live access token carries the call
+  instead.
+- It answers 5xx: the engine spends the refresh token before the steps that can still fail with a
+  500, and a proxy can answer 5xx after the engine answered, so the plugin drops the refresh token.
+  The live access token serves until it expires; then `login_required`. Changed in 1.0.1; 1.0.0
+  kept the token, and its next refresh could trip the replay check.
 - It answers 4xx: `login_required`, latched until `oauth.json` changes, so a dead pair is not
   presented again.
 - The refresh was sent and its answer never came back: `login_required`. The engine may already

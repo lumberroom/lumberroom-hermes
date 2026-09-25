@@ -329,6 +329,18 @@ class OAuthAuth:
             else:
                 cause = "no request sent" if status is None else f"HTTP {status}"
                 self._reload()      # the rotated pair after a success, the old one after a refusal
+                if status is not None and status >= 500:
+                    # The engine spends the refresh token before the steps that can still fail
+                    # with a 500 (ENG/src/authserver/routes.rs rotate_refresh), and a proxy can
+                    # answer 5xx after the engine answered. Presenting the token again risks the
+                    # replay that revokes the family, so it goes; the live access token still
+                    # serves until it expires.
+                    self._forget_refresh_token()
+                    expires_at = self._stored.expires_at
+                    if expires_at is not None and expires_at > time.time():
+                        return
+                    raise LoginRequired(f"a lumberroom token refresh failed ({cause}) after it reached "
+                                        f"the engine, so the stored sign-in cannot be trusted: {_LOGIN_HINT}")
         # Judged from the file: a flow queued ahead on the SDK's lock may have done the refresh.
         if not self._due():
             return

@@ -33,7 +33,7 @@ through the same tools; the plugin carries no cloud-specific code path (spec
 From a release, into the directory Hermes loads providers from:
 
 ```bash
-git clone --depth 1 --branch v1.0.0 https://github.com/lumberroom/lumberroom-hermes \
+git clone --depth 1 --branch v1.0.1 https://github.com/lumberroom/lumberroom-hermes \
   ~/.hermes/plugins/lumberroom
 hermes memory setup lumberroom
 ```
@@ -151,7 +151,8 @@ cron job posts to. Remove `cron` from `local_platforms` to turn that off.
 | engine returns a tool error | hits block omitted for that call, digest stays armed to retry | `{"error": "<engine text>"}` |
 | 401, token mode | `""` | `{"error": "lumberroom refused LUMBERROOM_HERMES_TOKEN (401). Check the token and its grant."}` |
 | OAuth, no token file, or a refresh the token endpoint refused (4xx) | the login line once per session | `{"error": "lumberroom is not logged in. Run hermes lumberroom login."}` |
-| OAuth, a due refresh answered 5xx or failed to connect, and the stored access token is already expired | treated as unreachable, as above | treated as unreachable, as above |
+| OAuth, a due refresh failed to connect, and the stored access token is already expired | treated as unreachable, as above | treated as unreachable, as above |
+| OAuth, a due refresh answered 5xx | the refresh token is dropped; the live access token serves until it expires, then the login line | same, then `{"error": "lumberroom is not logged in. Run hermes lumberroom login."}` |
 | OAuth, a refresh reached the engine and got no answer (a read timeout, the fence's own wait bound, or another failure after the send) | the login line once per session | the stored refresh token is dropped first, then `{"error": "lumberroom is not logged in. Run hermes lumberroom login."}`; costs one sign-in even when the refresh landed |
 | OAuth, the engine rotated the pair and the plugin could not write it to `oauth.json` (disk full, permissions) | treated as unreachable, as above | treated as unreachable, as above |
 | OAuth, cold process, access token expired, refresh token live | the fence refreshes 60 seconds before expiry (design target, `tokens.py:REFRESH_SKEW_S`); the call proceeds | same |
