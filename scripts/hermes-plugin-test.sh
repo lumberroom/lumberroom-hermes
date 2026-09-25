@@ -273,13 +273,23 @@ drive "$HOME_O" write --nonce "$NONCE" --session "hpt-oa-$NONCE" >"$WORK/owrite.
 drive "$HOME_O" recall --nonce "$NONCE" --session "hpt-ob-$NONCE" >"$WORK/orecall.out" 2>&1 \
   && pass "OAuth recall carries the nonce" || fail "OAuth recall: $(head -c 600 "$WORK/orecall.out")"
 
-say "13/13 two processes inside the refresh window refresh once, and nobody is logged out"
-sleep 20
+say "13/13 two processes past the access token's expiry refresh once, and nobody is logged out"
+# The engine issues 75-second access tokens here. The step waits until the stored token has expired,
+# so both processes need a refresh, then proves one happened: without that check a run in which
+# nothing refreshes passes the no-replay assertion for free.
+TOKEN_FILE="$HOME_O/lumberroom/oauth.json"
+token_field() { "$PY" -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d["tokens"][sys.argv[2]] if sys.argv[2] != "expires_at" else d.get("expires_at") or 0)' "$TOKEN_FILE" "$1"; }
+ACCESS_BEFORE="$(token_field access_token)"
+WAIT_S="$("$PY" -c 'import sys, time; print(max(0, int(float(sys.argv[1]) - time.time()) + 3))' "$(token_field expires_at)")"
+say "   waiting ${WAIT_S}s for the access token to expire"
+sleep "$WAIT_S"
 ( drive "$HOME_O" recall --nonce "$NONCE" --session "hpt-r1-$NONCE" >"$WORK/r1.out" 2>&1; echo $? >"$WORK/r1.rc" ) &
 ( drive "$HOME_O" recall --nonce "$NONCE" --session "hpt-r2-$NONCE" >"$WORK/r2.out" 2>&1; echo $? >"$WORK/r2.rc" ) &
 wait
 [ "$(cat "$WORK/r1.rc")" = 0 ] && [ "$(cat "$WORK/r2.rc")" = 0 ] \
   && pass "both processes recalled after the refresh" || fail "a process failed across the refresh: $(cat "$WORK/r1.out" "$WORK/r2.out" | head -c 800)"
+[ "$(token_field access_token)" != "$ACCESS_BEFORE" ] \
+  && pass "a refresh stored a new access token" || fail "no refresh happened: the stored access token did not change"
 REPLAYS="$(docker logs "$SCRATCH_NAME" 2>&1 | grep -c 'refresh token replayed' || true)"
 [ "$REPLAYS" = 0 ] && pass "no refresh token was replayed" || fail "the engine saw $REPLAYS refresh replays and revoked the family"
 

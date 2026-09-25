@@ -25,11 +25,18 @@ Invocation = Literal["hook", "model"]
 CallKind = Literal["ok", "tool_error", "unreachable", "timeout", "unauthorized", "login_required"]
 CLIENT_INFO_NAME = "lumberroom-hermes"
 
-# A proxy answers 502 or 503 while the engine restarts, before the request reaches it. Any other
-# 5xx may come from an engine that already acted, so it maps to "timeout", which tells the model
-# a write may have landed.
+# 502 and 503 map to "unreachable", the usual answer of a proxy whose engine is restarting. A proxy
+# can also answer 502 after the engine took the request and died before replying, so a write
+# reported unreachable may have landed; the owner accepted that. Any other 5xx maps to "timeout",
+# which tells the model a write may have landed.
 _NOT_FORWARDED = (502, 503)
 _LOOP_SLACK_S = 0.1
+# A bound the plugin chose on exit latency. Hermes calls provider.shutdown with no bound of its own
+# (its 5.0s drain at HERMES/agent/memory_manager.py:31 covers the sync executor, which runs first).
+# close() spends what its own timeout leaves of this waiting out a token refresh, because a refresh
+# cancelled after the engine rotated strands the only live refresh token; one still running past it
+# is cancelled, and the plugin drops the refresh token, which costs one sign-in.
+_HOST_DRAIN_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -57,11 +64,11 @@ class _HttpStatus(Exception):
 
 
 class _EngineAuth(httpx2.Auth):
-    """Delegates to whatever auth the handle holds now, then judges the final response only.
+    """Delegates to the handle's auth on every request, then judges the final response only.
 
-    The OAuth handle rebuilds its provider when a peer process refreshes, so a client that kept
-    the first provider would send a revoked token. The status check waits for the inner flow to
-    end because an event hook also sees the 401 that an OAuth refresh answers and retries.
+    The OAuth handle keeps one provider and reseeds it in place when a peer process refreshes, so
+    asking per request costs nothing and leaves that choice with the handle. The status check waits
+    for the inner flow to end because an event hook also sees a 401 the auth flow recovers from.
     """
 
     def __init__(self, handle: AuthHandle, *, raise_for_status: bool) -> None:
@@ -243,10 +250,11 @@ class Bridge:
         self._closed = True
         if loop is None or already:
             return
-        deadline = time.monotonic() + timeout
-        future = asyncio.run_coroutine_threadsafe(self._shutdown(timeout * 0.6), loop)
+        settle = max(0.0, _HOST_DRAIN_S - timeout)
+        deadline = time.monotonic() + settle + timeout
+        future = asyncio.run_coroutine_threadsafe(self._shutdown(settle, timeout * 0.6), loop)
         try:
-            future.result(timeout * 0.7)
+            future.result(settle + timeout * 0.7)
         except Exception:
             future.cancel()
         with contextlib.suppress(RuntimeError):
@@ -431,7 +439,13 @@ class Bridge:
             parsed = None
         return response.status_code, parsed
 
-    async def _shutdown(self, budget: float) -> None:
+    async def _shutdown(self, settle_budget: float, budget: float) -> None:
+        # First, before anything is cancelled: the loop's teardown would cancel a fenced refresh
+        # too, and a call in flight may still be waiting on it.
+        settle = getattr(self._auth, "settle", None)
+        if settle is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(settle(settle_budget), settle_budget + _LOOP_SLACK_S)
         for task in list(self._inflight):
             task.cancel()
         sessions = list(self._sessions.values())

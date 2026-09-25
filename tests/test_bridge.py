@@ -327,6 +327,21 @@ def test_a_fence_timeout_is_unreachable(cfg, fake_engine):
     assert fake_engine.requests == []
 
 
+def test_a_refresh_the_token_endpoint_could_not_answer_is_unreachable(cfg, fake_engine):
+    from lumberroom_hermes import auth as auth_mod
+
+    class Down(OAuthLike):
+        @contextlib.asynccontextmanager
+        async def refresh_guard(self):
+            raise auth_mod.RefreshUnavailable("the token endpoint answered 502")
+            yield
+
+    with running(cfg, Down(None), fake_engine.client_factory) as b:
+        r = b.call("memory_write", {"content": "c", "namespace": "user:me"}, invocation="model", timeout=5)
+    assert r.kind == "unreachable"
+    assert fake_engine.requests == []
+
+
 def test_a_session_that_lost_its_connection_reconnects_on_the_next_call(bridge, fake_engine):
     fake_engine.status_override = 503
     bridge.call("memory_search", {"query": "q"}, invocation="hook", timeout=2)
@@ -422,6 +437,43 @@ def test_a_call_in_flight_at_close_returns_a_result(fake_engine, cfg):
     b.close(timeout=2.0)
     t.join(3)
     assert [r.kind for r in out] == ["timeout"]
+
+
+class Settling(StaticAuth):
+    """A handle with a refresh in flight that ends after settle_s."""
+
+    def __init__(self, settle_s):
+        super().__init__()
+        self.settle_s, self.budgets = settle_s, []
+
+    async def settle(self, timeout):
+        import asyncio
+        self.budgets.append(timeout)
+        await asyncio.sleep(min(self.settle_s, timeout))
+
+
+def test_close_settles_the_auth_handle_before_it_cancels_a_call_in_flight(fake_engine, cfg):
+    auth = Settling(settle_s=0.6)
+    b = Bridge(cfg, auth, session_id="s", client_factory=fake_engine.client_factory)
+    b.start()
+    b.call("memory_search", {"query": "warm"}, invocation="hook", timeout=5)
+    fake_engine.delay_s = 0.3
+    out = []
+    t = threading.Thread(target=lambda: out.append(b.call("memory_search", {"query": "q"}, invocation="hook", timeout=5)))
+    t.start()
+    time.sleep(0.1)
+    b.close(timeout=2.0)
+    t.join(3)
+    assert [r.kind for r in out] == ["ok"]
+
+
+def test_close_gives_settle_what_its_own_timeout_leaves_of_the_host_drain(fake_engine, cfg):
+    auth = Settling(settle_s=30)
+    b = Bridge(cfg, auth, session_id="s", client_factory=fake_engine.client_factory)
+    b.start()
+    started = time.monotonic()
+    b.close(timeout=2.0)
+    assert auth.budgets == [pytest.approx(3.0)] and time.monotonic() - started < 5.3
 
 
 def test_close_closes_every_http_client_the_bridge_opened(fake_engine, cfg):

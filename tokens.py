@@ -70,7 +70,35 @@ class FileTokenStorage:
     async def set_tokens(self, tokens) -> None:
         # A missing expires_in stays null on disk so refresh_guard treats the pair as due.
         expires_at = None if tokens.expires_in is None else self._clock() + float(tokens.expires_in)
-        self._update(tokens=_dump(tokens), expires_at=expires_at)
+        self.save_tokens(_dump(tokens), expires_at)
+
+    def save_tokens(self, tokens: Mapping[str, Any], expires_at: float | None, *,
+                    client_info: Mapping[str, Any] | None = None,
+                    oauth_metadata: Mapping[str, Any] | None = None) -> None:
+        """Write a token dump with an absolute expiry, for a pair whose first write failed.
+
+        client_info and oauth_metadata restore what an unlinked file lost; None keeps what is on disk.
+        """
+        fields: dict[str, Any] = {"tokens": dict(tokens), "expires_at": expires_at}
+        if client_info is not None:
+            fields["client_info"] = dict(client_info)
+        if oauth_metadata is not None:
+            fields["oauth_metadata"] = dict(oauth_metadata)
+        self._update(**fields)
+
+    def drop_refresh_token(self) -> None:
+        """Keep the access token and forget the refresh token. No file, no write.
+
+        For a refresh whose answer never came back: the engine may have spent the token already,
+        and presenting it again would revoke the whole family.
+        """
+        with self._write_lock:
+            current = self.read()
+            if current.tokens is None:
+                return
+            tokens = {k: v for k, v in current.tokens.items() if k != "refresh_token"}
+            self._write({"mcp_url": self._mcp_url, "tokens": tokens, "expires_at": current.expires_at,
+                         "client_info": current.client_info, "oauth_metadata": current.oauth_metadata})
 
     async def get_client_info(self):
         from mcp.shared.auth import OAuthClientInformationFull
@@ -181,6 +209,15 @@ class RefreshFence:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> "RefreshFence":
+        # For callers with no loop, such as logout. Blocks the calling thread up to the timeout.
+        self._lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
         self._lock.release()
 
     def _acquire(self) -> None:

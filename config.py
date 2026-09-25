@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
+HOSTED_DOMAIN = "lumberroom.cloud"
 HOSTED_BASE_URL = "https://mcp.lumberroom.cloud"
+REVIEW_TOOLS: tuple[str, ...] = ("review_queue", "review_decide")
 TOKEN_ENV = "LUMBERROOM_HERMES_TOKEN"
 DEFAULT_TOOLS: tuple[str, ...] = ("memory_search", "memory_write", "registry_get", "memory_forget")
 DEFAULT_LOCAL_PLATFORMS: tuple[str, ...] = ("cli", "tui", "desktop", "acp", "cron")
+# A platform in local_platforms counts as the owner on every turn, so only transports that run on
+# the owner's own machine may appear there. A gateway named here would hand the store to its room.
+LOCAL_PLATFORM_CHOICES = frozenset(DEFAULT_LOCAL_PLATFORMS)
 AuthMode = Literal["token", "oauth"]
 
 _INT_RANGES = {
@@ -24,7 +30,7 @@ _FLOAT_RANGES = {
     "tool_timeout_s": (1.0, 120.0),
     "connect_timeout_s": (0.5, 30.0),
 }
-_BOOLS = ("recall", "digest")
+_BOOLS = ("recall", "digest", "dreaming_review")
 _LISTS = ("tools", "owner_user_ids", "local_platforms")
 _KNOWN = {"base_url", "auth", "project", *_INT_RANGES, *_FLOAT_RANGES, *_BOOLS, *_LISTS}
 
@@ -40,6 +46,10 @@ class LumberroomConfig:
     project: str = "auto"
     recall: bool = True
     digest: bool = True
+    # The owner's ruling of 25 September 2026: review_queue and review_decide reach the model only
+    # when this is on, the engine is lumberroom.cloud, and the live tools/list offers them. The OSS
+    # engine carries the same two tools for cleanup and ingest proposals; they stay off there.
+    dreaming_review: bool = False
     digest_max_chars: int = 6000
     recall_limit: int = 4
     recall_max_chars: int = 1200
@@ -60,6 +70,13 @@ class LumberroomConfig:
     def mcp_url(self) -> str:
         return self.origin + "/mcp"
 
+    @property
+    def is_hosted(self) -> bool:
+        # Engine and fork both answer serverInfo rmcp, so the host is the only signal the plugin
+        # has. A staging copy of the hosted build under another domain reads as self-hosted.
+        host = (urllib.parse.urlsplit(self.origin).hostname or "").lower()
+        return host == HOSTED_DOMAIN or host.endswith("." + HOSTED_DOMAIN)
+
 
 def section(config: Mapping[str, Any]) -> dict[str, Any]:
     memory = config.get("memory") if isinstance(config, Mapping) else None
@@ -68,12 +85,21 @@ def section(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _base_url(raw: Any) -> str:
+    # The owner's ruling of 25 September 2026: an unset base_url means lumberroom.cloud. A
+    # self-hosted engine is one base_url away and runs the same code.
+    if raw is None:
+        return HOSTED_BASE_URL
     if not isinstance(raw, str) or not raw.strip():
-        raise ConfigError("memory.lumberroom.base_url is required: the engine's URL, such as http://127.0.0.1:8787")
+        raise ConfigError("memory.lumberroom.base_url must be the engine's URL, such as http://127.0.0.1:8787")
     url = raw.strip().rstrip("/")
     scheme, sep, rest = url.partition("://")
     if not sep or scheme.lower() not in ("http", "https") or not rest:
         raise ConfigError(f"memory.lumberroom.base_url must start with http:// or https://, got {raw!r}")
+    # A query, fragment or userinfo would let the text after it pass for the host: is_hosted read
+    # https://evil.example?.lumberroom.cloud as hosted while the client connected to evil.example.
+    parts = urllib.parse.urlsplit(url)
+    if parts.query or parts.fragment or "@" in parts.netloc or not parts.hostname:
+        raise ConfigError(f"memory.lumberroom.base_url must be a plain origin such as https://host, got {raw!r}")
     return scheme.lower() + "://" + rest
 
 
@@ -81,7 +107,7 @@ def parse(block: Mapping[str, Any]) -> LumberroomConfig:
     unknown = sorted(set(block) - _KNOWN)
     if unknown:
         raise ConfigError(f"unknown key memory.lumberroom.{unknown[0]}")
-    auth = block.get("auth")
+    auth = block.get("auth", "oauth")
     if auth not in ("token", "oauth"):
         raise ConfigError("memory.lumberroom.auth must be token or oauth")
     values: dict[str, Any] = {"base_url": _base_url(block.get("base_url")), "auth": auth}
@@ -126,6 +152,12 @@ def parse(block: Mapping[str, Any]) -> LumberroomConfig:
             raise ConfigError(
                 f"memory.lumberroom.owner_user_ids cannot list {owner!r}: an api_server author is "
                 "whatever the caller puts in the request body"
+            )
+    for platform in values.get("local_platforms", ()):
+        if platform not in LOCAL_PLATFORM_CHOICES:
+            raise ConfigError(
+                f"memory.lumberroom.local_platforms may list only {', '.join(DEFAULT_LOCAL_PLATFORMS)}, "
+                f"got {platform!r}; a gateway's owners go in owner_user_ids"
             )
     return LumberroomConfig(**values)
 

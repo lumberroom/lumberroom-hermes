@@ -99,13 +99,43 @@ def _logout(args: Any) -> int:
         return 1
 
     from .auth import logout as run_logout
+    from .tokens import FenceTimeout
 
-    existed = run_logout(cfg, hermes_home=_hermes_home())
+    try:
+        existed = run_logout(cfg, hermes_home=_hermes_home())
+    except FenceTimeout as exc:
+        print(str(exc))
+        return 1
     print("logged out" if existed else "already logged out")
     return 0
 
 
-def run_live_check(cfg, hermes_home: str, *, out: Callable[[str], None] = print, as_json: bool = False) -> int:
+def _oauth_credential_present(cfg, hermes_home: str) -> bool:
+    """Whether oauth.json on disk holds a token pair. No network, no refresh."""
+    from .tokens import FileTokenStorage, token_paths
+
+    path, _ = token_paths(hermes_home)
+    return FileTokenStorage(path, cfg.mcp_url).read().tokens is not None
+
+
+def _dreaming_review_status(cfg, tools: list[str], reachable: bool = True) -> tuple[bool, str | None]:
+    """(on, reason). reason is None when on, else the one of three causes the owner ruled on."""
+    from .config import REVIEW_TOOLS
+
+    if not cfg.dreaming_review:
+        return False, "setting off"
+    if not cfg.is_hosted:
+        return False, "not lumberroom.cloud"
+    # An empty list from an engine that never answered says nothing about the grant.
+    if not reachable:
+        return False, "unknown until the engine answers"
+    if not all(tool in tools for tool in REVIEW_TOOLS):
+        return False, "the server's grant lacks the tools"
+    return True, None
+
+
+def run_live_check(cfg, hermes_home: str, *, out: Callable[[str], None] = print, as_json: bool = False,
+                   client_factory: Callable[..., Any] | None = None) -> int:
     """One tools/list round trip, printed as key/value lines or one JSON object.
 
     Shared between `status` and the wizard's own live-check step, so the two never drift.
@@ -119,15 +149,23 @@ def run_live_check(cfg, hermes_home: str, *, out: Callable[[str], None] = print,
     memory_enabled, user_profile_enabled = builtin_flags(load_config())
     built_in = "off" if not memory_enabled and not user_profile_enabled else "on"
 
+    credential = (auth_mod.token_present(cfg) if cfg.auth == "token"
+                 else _oauth_credential_present(cfg, hermes_home))
+
     payload: dict[str, Any] = {
         "base_url": cfg.base_url, "auth": cfg.auth,
-        "credential": auth_mod.token_present(cfg), "built_in_store": built_in,
-        "reachable": False, "tools": [], "round_trip_ms": None,
+        "credential": credential, "built_in_store": built_in, "server_version": None,
+        "reachable": False, "tools": [], "round_trip_ms": None, "error": None,
     }
 
     try:
         handle = auth_mod.build_auth(cfg, hermes_home=hermes_home, interactive=False)
-        bridge = Bridge(cfg, handle, session_id="cli-status")
+    except auth_mod.AuthConfigError as exc:
+        payload["error"] = str(exc)
+        handle = None
+
+    if handle is not None:
+        bridge = Bridge(cfg, handle, session_id="cli-status", client_factory=client_factory)
         bridge.start()
         try:
             started = time.monotonic()
@@ -136,10 +174,15 @@ def run_live_check(cfg, hermes_home: str, *, out: Callable[[str], None] = print,
             if result.ok and listing is not None:
                 payload["reachable"] = True
                 payload["tools"] = [t["name"] for t in listing.tools]
+                payload["server_version"] = (result.structured or {}).get("serverInfo", {}).get("version")
+            else:
+                payload["error"] = result.error
         finally:
             bridge.close()
-    except auth_mod.LoginRequired:
-        pass
+
+    dreaming_on, dreaming_reason = _dreaming_review_status(cfg, payload["tools"], payload.get("reachable", False))
+    payload["dreaming_review"] = dreaming_on
+    payload["dreaming_review_reason"] = dreaming_reason
 
     if as_json:
         out(json.dumps(payload))
@@ -148,9 +191,13 @@ def run_live_check(cfg, hermes_home: str, *, out: Callable[[str], None] = print,
         out(f"auth: {payload['auth']}")
         out(f"credential: {'present' if payload['credential'] else 'missing'}")
         out(f"built-in store: {payload['built_in_store']}")
+        out(f"server version: {payload['server_version'] or 'unknown'}")
         out(f"reachable: {payload['reachable']}")
+        if not payload["reachable"] and payload["error"]:
+            out(f"reason: {payload['error']}")
         out(f"tools: {', '.join(payload['tools'])}")
         out(f"round trip ms: {payload['round_trip_ms']}")
+        out(f"dreaming review: {'on' if dreaming_on else f'off ({dreaming_reason})'}")
     return 0 if payload["reachable"] else 1
 
 
@@ -168,9 +215,12 @@ def _import_builtin(args: Any) -> int:
         print(str(err))
         return 1
 
+    import httpx2
+
     from . import auth as auth_mod
     from .bridge import Bridge
     from .importer import MissingGrant, import_builtin as run_import, read_builtin_entries
+    from .tokens import FenceTimeout
 
     hermes_home = _hermes_home()
     dry_run = getattr(args, "dry_run", False)
@@ -182,7 +232,12 @@ def _import_builtin(args: Any) -> int:
         print(f"{len(entries)} entries would be imported. Nothing was posted.")
         return 0
 
-    handle = auth_mod.build_auth(cfg, hermes_home=hermes_home, interactive=False)
+    try:
+        handle = auth_mod.build_auth(cfg, hermes_home=hermes_home, interactive=False)
+    except auth_mod.AuthConfigError as exc:
+        print(str(exc))
+        return 1
+
     bridge = Bridge(cfg, handle, session_id="cli-import")
     bridge.start()
     try:
@@ -191,6 +246,10 @@ def _import_builtin(args: Any) -> int:
         print("lumberroom refused the import (403): this credential lacks mayIngest. Add "
               '"mayIngest": true to its AUTH_TOKENS entry, or use a full consent grant.')
         return 2
+    except (RuntimeError, TimeoutError, auth_mod.LoginRequired, auth_mod.RefreshUnavailable,
+            auth_mod.TokenSaveFailed, FenceTimeout, httpx2.TransportError) as exc:
+        print(str(exc))
+        return 1
     finally:
         bridge.close()
 

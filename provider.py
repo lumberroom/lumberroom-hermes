@@ -82,7 +82,6 @@ class LumberroomProvider(MemoryProvider):
         self._instructions: str | None = None
         self._builtin_off = False
 
-        self._unauthenticated = False
         self._told_login_this_session = False
 
         self._digest_armed = False
@@ -136,7 +135,13 @@ class LumberroomProvider(MemoryProvider):
         hermes_home = self._resolve_hermes_home()
         listing = schemas.read_cache(hermes_home) if hermes_home else None
         tools = listing["tools"] if listing else schemas.load_snapshot()["tools"]
-        self._candidate_tools = schemas.select(cfg.tools, tools)
+        # review_queue and review_decide reach the model only through dreaming_review on a hosted
+        # engine (owner ruling, 25 September 2026), never through the tools allowlist: an owner who
+        # lists them there without the setting still gets neither.
+        candidate = [t for t in schemas.select(cfg.tools, tools) if t["name"] not in config.REVIEW_TOOLS]
+        if cfg.dreaming_review and cfg.is_hosted:
+            candidate += schemas.select(config.REVIEW_TOOLS, tools)
+        self._candidate_tools = candidate
 
     @staticmethod
     def _resolve_hermes_home() -> str | None:
@@ -187,9 +192,7 @@ class LumberroomProvider(MemoryProvider):
         self._bridge = bridge
         bridge.start()
         result, listing = bridge.list_tools(timeout=_INIT_TIMEOUT_S)
-        if result.kind == "login_required":
-            self._unauthenticated = True
-        elif result.ok and listing is not None:
+        if result.ok and listing is not None:
             self._live_tools = list(listing.tools)
             self._instructions = listing.instructions
             if self._hermes_home:
@@ -198,7 +201,9 @@ class LumberroomProvider(MemoryProvider):
                                         {"instructions": listing.instructions, "tools": list(listing.tools)})
                 except OSError as e:
                     logger.warning("lumberroom could not write the tool cache: %s", e)
-        # A timeout or an unreachable engine leaves live_tools unset: degraded, retried later.
+        # Any other answer leaves live_tools unset for the life of this provider, and nothing
+        # fetches the listing again. Schemas fall back to the frozen candidate set, and the engine
+        # refuses a call the grant lacks.
         self._digest_armed = True
 
     def shutdown(self) -> None:
@@ -216,9 +221,17 @@ class LumberroomProvider(MemoryProvider):
         if not self._session_allowed:
             return []
         if self._live_tools is None:
-            return [schemas.to_hermes_schema(t) for t in self._candidate_tools]
+            # No live listing to prove the server offers the review tools, so a degraded init
+            # drops them; the ruling puts them behind the server's own tools/list.
+            return [schemas.to_hermes_schema(t) for t in self._candidate_tools
+                    if t["name"] not in config.REVIEW_TOOLS]
         live_names = {t["name"] for t in self._live_tools}
         return [schemas.to_hermes_schema(t) for t in self._candidate_tools if t["name"] in live_names]
+
+    def _review_tool_offered(self, tool_name: str) -> bool:
+        if tool_name not in config.REVIEW_TOOLS:
+            return True
+        return self._live_tools is not None and any(t["name"] == tool_name for t in self._live_tools)
 
     def system_prompt_block(self) -> str:
         if self._inert_reason or not self._session_allowed:
@@ -266,7 +279,8 @@ class LumberroomProvider(MemoryProvider):
         return "tool_error"
 
     def _prefetch_login_line(self) -> str:
-        self._unauthenticated = True
+        # Said once per session, and never latched: the next turn asks the auth handle again, so a
+        # login in another terminal takes effect without a restart.
         self._recall_status = None
         if self._told_login_this_session:
             return ""
@@ -284,8 +298,6 @@ class LumberroomProvider(MemoryProvider):
             return ""
         if not self._turn_reaches_engine():
             return ""
-        if self._unauthenticated:
-            return self._prefetch_login_line()
         if not self._breaker.allow():
             return ""
 
@@ -314,6 +326,7 @@ class LumberroomProvider(MemoryProvider):
                 r = results[idx - 1]
                 text = (r.structured or {}).get("text", "")
                 digest_text = recall.format_digest(text, self._cfg.digest_max_chars)
+                # Every return below carries digest_text, so this turn delivers it.
                 self._digest_armed = False
             # a tool error leaves the digest unset and armed, to retry on the next turn
 
@@ -322,9 +335,9 @@ class LumberroomProvider(MemoryProvider):
         hits_text = ""
         count = 0
         if outcome == "login":
-            return self._prefetch_login_line()
+            return recall.compose([digest_text, self._prefetch_login_line()])
         if outcome == "outage":
-            return self._prefetch_outage_line()
+            return recall.compose([digest_text, self._prefetch_outage_line()])
         if outcome == "ok":
             hits = (search_result.structured or {}).get("hits", [])
             hits_text, ids = recall.format_hits(hits, self._injected_ids, self._cfg.recall_max_chars)
@@ -352,6 +365,12 @@ class LumberroomProvider(MemoryProvider):
         if self._inert_reason or not self._session_allowed or self._agent_context != "primary":
             return
         if self._cfg is None or self._cfg.review_interval <= 0:
+            return
+        # A refused turn in a shared chat must not ripen the nudge: it would reach the owner's next
+        # turn and prompt writes of another member's claims. turn_author names this turn's writer,
+        # and _current_author_id may already belong to the next turn on Hermes's sync worker.
+        author_id = (turn_author or {}).get("id") or None
+        if self._ident is None or not gate.turn_allowed(self._ident, author_id, self._cfg):
             return
         self._turns_since_nudge += 1
         if self._turns_since_nudge >= self._cfg.review_interval:
@@ -385,20 +404,22 @@ class LumberroomProvider(MemoryProvider):
             return json.dumps({"error": f"lumberroom refused {config.TOKEN_ENV} (401). "
                                         "Check the token and its grant."})
         if result.kind == "login_required":
-            self._unauthenticated = True
             return json.dumps({"error": _LOGIN_REQUIRED_ERROR})
         return json.dumps({"error": result.error or result.text})
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         self._ensure_candidate_tools()
-        if tool_name not in _known_tool_names():
+        # The frozen candidate set is what get_tool_schemas exposed. An inert provider has none,
+        # so it falls back to every name it could expose and reports its own reason instead.
+        exposed = {t["name"] for t in self._candidate_tools}
+        if self._inert_reason:
+            exposed |= _known_tool_names()
+        if tool_name not in exposed or not self._review_tool_offered(tool_name):
             return json.dumps({"error": f"lumberroom does not expose the tool {tool_name!r}"})
         if self._inert_reason:
             return json.dumps({"error": self._inert_reason})
         if not self._turn_reaches_engine():
             return json.dumps({"error": gate.REFUSAL})
-        if self._unauthenticated:
-            return json.dumps({"error": _LOGIN_REQUIRED_ERROR})
         if self._bridge is None:
             return json.dumps({"error": gate.REFUSAL})
         result = self._bridge.call(tool_name, dict(args), invocation="model", timeout=self._cfg.tool_timeout_s)

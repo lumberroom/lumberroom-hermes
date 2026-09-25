@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import http.server
+import os
 import queue
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 from urllib.parse import parse_qs, urlsplit
 
 from .config import TOKEN_ENV, LumberroomConfig
-from .tokens import REFRESH_SKEW_S, FileTokenStorage, RefreshFence, StoredOAuth, token_paths
+from .tokens import FENCE_TIMEOUT_S, REFRESH_SKEW_S, FileTokenStorage, RefreshFence, StoredOAuth, token_paths
 
 CLIENT_NAME = "Hermes Agent (lumberroom)"
 
@@ -33,6 +35,14 @@ class LoginFailed(Exception):
     """The authorization server or the pasted URL refused the login."""
 
 
+class RefreshUnavailable(Exception):
+    """A due refresh got no usable answer and the stored access token has already expired."""
+
+
+class TokenSaveFailed(Exception):
+    """The engine rotated the pair and the plugin could not write it to oauth.json."""
+
+
 class _NoCode(LoginFailed):
     """A callback URL with neither a code nor an error: a stray request or a partial paste."""
 
@@ -45,6 +55,8 @@ class AuthHandle(Protocol):
     def httpx_auth(self) -> Any: ...   # httpx2.Auth or None
 
     def refresh_guard(self) -> contextlib.AbstractAsyncContextManager[None]: ...
+
+    async def settle(self, timeout: float) -> None: ...   # optional: waits out a refresh in flight
 
 
 def _http_client(**kwargs: Any) -> Any:
@@ -117,8 +129,13 @@ def login(cfg: LumberroomConfig, *, hermes_home: str, open_browser: bool,
 
 def logout(cfg: LumberroomConfig, *, hermes_home: str) -> bool:
     """Delete this profile's token file. True when one existed."""
-    path, _ = token_paths(hermes_home)
-    return FileTokenStorage(path, cfg.mcp_url).clear()
+    path, lock_path = token_paths(hermes_home)
+    if not path.exists():
+        return False
+    # A peer mid-refresh writes the rotated pair back when it finishes, which would undo a
+    # delete that did not wait for it.
+    with RefreshFence(lock_path):
+        return FileTokenStorage(path, cfg.mcp_url).clear()
 
 
 class TokenAuth:
@@ -137,6 +154,9 @@ class TokenAuth:
     async def refresh_guard(self):
         yield
 
+    async def settle(self, timeout: float) -> None:
+        return None
+
 
 def _model(cls: Any, raw: dict[str, Any] | None) -> Any:
     from pydantic import ValidationError
@@ -154,6 +174,18 @@ class OAuthAuth:
 
     The bridge hands httpx_auth() to its clients once, so a peer's refresh reaches this process by
     reseeding the same provider's context in place, never by swapping the provider object.
+
+    Only refresh_guard refreshes. It runs the grant as a task of its own that holds the fence until
+    the rotated pair is on disk, so a caller that hits its deadline stops waiting and the refresh
+    still finishes. The grant goes through a private OAuthClientProvider seeded from oauth.json, and
+    the shared provider the MCP clients hold is seeded with no expiry, so no flow on it (another
+    session's POST, a GET reconnect, a notification, the DELETE on close) ever runs a grant of its
+    own outside the lost-answer and failed-save handling below.
+
+    A refresh that was sent and got no answer costs one sign-in. The engine may have rotated
+    already, so the plugin drops the refresh token from oauth.json and reports login_required
+    rather than present a token the engine would treat as a replay and answer by revoking the
+    family.
     """
 
     mode = "oauth"
@@ -167,6 +199,7 @@ class OAuthAuth:
         self._cfg = cfg
         self._interactive = interactive
         token_path, self._lock_path = token_paths(hermes_home)
+        self._token_path = token_path
         self.storage = FileTokenStorage(token_path, cfg.mcp_url)
         if interactive:
             flow = _BrowserSignIn(cfg.oauth_callback_port, open_browser=open_browser,
@@ -182,12 +215,15 @@ class OAuthAuth:
             token_endpoint_auth_method="none",
         )
         sdk_storage = _FreshSignInStorage(self.storage, self._lock_path) if fresh else self.storage
+        self._client_metadata = metadata
         self._provider = OAuthClientProvider(server_url=cfg.mcp_url, client_metadata=metadata,
                                              storage=sdk_storage, redirect_handler=self.redirect_handler,
                                              callback_handler=self.callback_handler)
-        self._lock = asyncio.Lock()
         self._stored = StoredOAuth(cfg.mcp_url, None, None, None, None)
         self._seen_mtime = 0
+        self._refresh: asyncio.Future[None] | None = None   # the fenced refresh or save in flight
+        self._unsaved: _Unsaved | None = None      # a rotated pair oauth.json refused
+        self._refused_mtime: int | None = None      # the file version whose refresh the server refused
         self._reload()
 
     def headers(self) -> dict[str, str]:
@@ -198,38 +234,211 @@ class OAuthAuth:
 
     @contextlib.asynccontextmanager
     async def refresh_guard(self):
-        await self._lock.acquire()
-        locked, fence = True, None
         try:
-            if self.storage.mtime_ns() != self._seen_mtime:
-                self._reload()      # a peer refreshed, signed in again or logged out
-            if not self._interactive and self._stored.tokens is None:
-                # Fail before the request: the SDK would spend a 401, discovery and a logged
-                # traceback reaching the same answer on every hook call.
-                raise LoginRequired(f"lumberroom is signed out: {_LOGIN_HINT}")
-            if self._due():
-                pending = RefreshFence(self._lock_path)
-                await pending.__aenter__()
-                fence = pending     # only a fence that was entered gets exited
-                self._reload()
-                if not self._due():  # a peer won the refresh while this process waited
-                    held, fence = fence, None
-                    await held.__aexit__(None, None, None)
-            if fence is None:
-                self._lock.release()
-                locked = False
-            # A due pair keeps the fence and the in-process lock through the request, so the
-            # refresh the SDK runs inside it is the only one on this profile.
+            await self._ready()
             yield
         finally:
+            with contextlib.suppress(OSError):
+                self._save_discovered_metadata()
+
+    async def settle(self, timeout: float) -> None:
+        """Wait up to timeout for the fenced refresh or save in flight, if there is one.
+
+        The bridge calls this before it tears its loop down. A refresh cancelled after the engine
+        rotated strands the only live refresh token, and the next process presents the spent one.
+        """
+        pending = self._refresh
+        if pending is not None and not pending.done() and timeout > 0:
+            await asyncio.wait([pending], timeout=timeout)
+        # A rotated pair oauth.json refused lives only in this process. One more try before exit;
+        # a failure leaves the file without a refresh token, so nobody replays the spent one.
+        if self._unsaved is not None and (self._refresh is None or self._refresh.done()) and timeout > 0:
+            save = asyncio.ensure_future(self._save_fenced())
+            save.add_done_callback(_consume)
+            await asyncio.wait([save], timeout=timeout)
+
+    async def _ready(self) -> None:
+        pending = self._refresh
+        if pending is None or pending.done():
+            pending = self._start()
+            if pending is None:
+                return
+        # The shield keeps a caller's deadline from cancelling the refresh. Cancelled after the
+        # engine rotated, it would strand the only live refresh token, and the next attempt would
+        # present the spent one and get the whole family revoked.
+        await asyncio.shield(pending)
+
+    def _start(self) -> asyncio.Future[None] | None:
+        """Start the fenced task this guard needs, or return None when the stored pair will do."""
+        if self._unsaved is not None:
+            job = self._save_fenced()
+        else:
+            if self.storage.mtime_ns() != self._seen_mtime:
+                self._reload()      # a peer refreshed, signed in again or logged out
+            if not self._interactive:
+                self._refuse_dead_pair()
+            if not self._due():
+                return None
+            if not self._interactive and self._refused_mtime == self._seen_mtime:
+                raise LoginRequired(f"lumberroom refused the stored sign-in: {_LOGIN_HINT}")
+            job = self._refresh_fenced()
+        # No await since the checks above, so every caller on this loop joins this one task.
+        task = self._refresh = asyncio.ensure_future(job)
+        task.add_done_callback(_consume)
+        return task
+
+    def _refuse_dead_pair(self) -> None:
+        # Fail before the request: the SDK would spend a 401, discovery and a logged traceback
+        # reaching the same answer on every hook call.
+        tokens = self._stored.tokens
+        if tokens is None:
+            raise LoginRequired(f"lumberroom is signed out: {_LOGIN_HINT}")
+        expires_at = self._stored.expires_at
+        if not tokens.get("refresh_token") and expires_at is not None and expires_at <= time.time():
+            raise LoginRequired(f"the lumberroom sign-in expired and cannot renew: {_LOGIN_HINT}")
+
+    async def _refresh_fenced(self) -> None:
+        import httpx2
+
+        async with RefreshFence(self._lock_path):
+            self._reload()
+            if not self._due():
+                return      # a peer refreshed while this process waited, or logged out
+            grant = _Grant()
             try:
-                if fence is not None:
-                    await fence.__aexit__(None, None, None)
-            finally:
-                if locked:
-                    self._lock.release()
-                with contextlib.suppress(OSError):
-                    self._save_discovered_metadata()
+                status = await asyncio.wait_for(self._sdk_refresh(grant), FENCE_TIMEOUT_S)
+            except _SaveRefused as e:
+                self._keep_unsaved(grant.provider)
+                raise TokenSaveFailed(f"lumberroom renewed the sign-in and could not save it to "
+                                      f"{self._token_path}: {e.__cause__}") from e.__cause__
+            except BaseException as e:
+                # A connect failure means the grant never left this machine. Any other failure
+                # after the send may follow a rotation the plugin never heard about.
+                if grant.sent and not isinstance(e, (httpx2.ConnectError, httpx2.ConnectTimeout)):
+                    self._forget_refresh_token()
+                    if isinstance(e, Exception):
+                        raise LoginRequired(f"a lumberroom token refresh got no answer, so the stored "
+                                            f"sign-in cannot be trusted: {_LOGIN_HINT}") from e
+                    raise
+                # The SDK clears its tokens when a refresh fails, and without this reseed every
+                # later request would go out unsigned and fall into the browser flow.
+                self._reload()
+                if not isinstance(e, (OSError, TimeoutError, httpx2.HTTPError)):
+                    raise
+                status, cause = None, f"not sent ({type(e).__name__})"
+            else:
+                cause = "no request sent" if status is None else f"HTTP {status}"
+                self._reload()      # the rotated pair after a success, the old one after a refusal
+        # Judged from the file: a flow queued ahead on the SDK's lock may have done the refresh.
+        if not self._due():
+            return
+        if (status is not None and 400 <= status < 500) or self._stored.client_info is None:
+            self._refused_mtime = self._seen_mtime
+            if not self._interactive:
+                raise LoginRequired(f"lumberroom refused the stored sign-in: {_LOGIN_HINT}")
+            return
+        expires_at = self._stored.expires_at
+        if expires_at is None or expires_at <= time.time():
+            raise RefreshUnavailable(f"the lumberroom token refresh failed ({cause}) and the access token has expired")
+
+    async def _sdk_refresh(self, grant: _Grant) -> int | None:
+        """Drive the SDK's auth flow through its refresh, then drop the request it would sign.
+
+        The token endpoint's status, or None when the SDK found a valid token and sent nothing.
+        """
+        import httpx2
+
+        from mcp.client.auth import OAuthClientProvider
+        from mcp.shared.auth import OAuthMetadata
+
+        # A private provider runs the grant. Marking the shared provider's token expired instead
+        # would let any flow queued on its lock run a grant of its own, whose lost answer or failed
+        # save no one here would see. Its first flow loads tokens and client info from the file.
+        private = grant.provider = OAuthClientProvider(
+            server_url=self._cfg.mcp_url, client_metadata=self._client_metadata, storage=self.storage,
+            redirect_handler=_refuse_redirect, callback_handler=_refuse_callback)
+        metadata = _model(OAuthMetadata, self._stored.oauth_metadata)
+        if metadata is None:
+            metadata = self._provider.context.oauth_metadata
+        if metadata is not None:
+            private.context.oauth_metadata = metadata
+        # 1.0 and not 0: is_token_valid reads a falsy expiry as a token that never expires.
+        private.context.token_expiry_time = 1.0
+        # No MCP-Protocol-Version header, so the SDK sends no resource parameter. The engine then
+        # binds the token to the one resource it serves, as it does for the Rust CLI's refresh.
+        probe = httpx2.Request("POST", self._cfg.mcp_url)
+        flow = private.async_auth_flow(probe)
+        try:
+            outgoing = await flow.__anext__()
+            if outgoing is probe:
+                return None
+            timeout = httpx2.Timeout(self._cfg.tool_timeout_s, connect=self._cfg.connect_timeout_s)
+            async with _http_client(timeout=timeout) as client:
+                # Marked before the send: one that fails partway may still have reached the engine.
+                grant.sent = True
+                response = await client.send(outgoing)
+                await response.aread()
+            # The SDK validates the answer and persists the rotated pair through storage.set_tokens.
+            try:
+                await flow.asend(response)
+            except OSError as e:
+                raise _SaveRefused() from e
+            return response.status_code
+        finally:
+            await flow.aclose()
+
+    def _keep_unsaved(self, private: Any) -> None:
+        # The private provider holds the rotated pair and the file still holds the spent refresh
+        # token. This process switches to the rotated pair, and the file loses its refresh token so a
+        # peer, or the next process, cannot present the spent one and get the family revoked.
+        rotated = private.context.current_tokens
+        stored = self._stored
+        self._unsaved = _Unsaved(
+            spent=(stored.tokens or {}).get("refresh_token"),
+            tokens=rotated.model_dump(by_alias=True, mode="json", exclude_none=True),
+            expires_at=private.context.token_expiry_time,
+            client_info=stored.client_info, oauth_metadata=stored.oauth_metadata,
+            marker=self._retire_spent_token())
+        ctx = self._provider.context
+        ctx.current_tokens = rotated
+        ctx.token_expiry_time = None
+
+    def _retire_spent_token(self) -> int:
+        """Take the spent refresh token off disk; the file's mtime afterwards, 0 once it is gone.
+
+        Dropping the field rewrites the file, which a full disk refuses. Unlinking needs no space.
+        When both fail (the directory itself refuses writes) a peer can still replay.
+        """
+        try:
+            self.storage.drop_refresh_token()
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(self._token_path)
+        return self.storage.mtime_ns()
+
+    async def _save_fenced(self) -> None:
+        pending = self._unsaved
+        async with RefreshFence(self._lock_path):
+            # Any change to the file since this process retired the spent token means a sign-in or
+            # a logout replaced it, and that wins.
+            if self.storage.mtime_ns() == pending.marker:
+                try:
+                    self.storage.save_tokens(pending.tokens, pending.expires_at,
+                                             client_info=pending.client_info,
+                                             oauth_metadata=pending.oauth_metadata)
+                except OSError as e:
+                    raise TokenSaveFailed(f"lumberroom renewed the sign-in and still cannot save it to "
+                                          f"{self._token_path}: {e}") from e
+            self._unsaved = None
+            self._reload()
+
+    def _forget_refresh_token(self) -> None:
+        with contextlib.suppress(OSError):
+            self.storage.drop_refresh_token()
+        self._reload()
+        # Holds only when the drop failed and the file still carries the token: this process
+        # then refuses to present it until oauth.json changes.
+        self._refused_mtime = self._seen_mtime
 
     def _due(self) -> bool:
         tokens = self._stored.tokens
@@ -247,11 +456,12 @@ class OAuthAuth:
         stored = self.storage.read()
         self._stored = stored
         ctx = self._provider.context
-        # mcp 2.0.0 loads tokens without their expiry and guesses <origin>/token for refresh
-        # without metadata. Both public fields close those gaps; spec section 6.2 has the table.
+        # mcp 2.0.0 guesses <origin>/token for refresh without metadata, so the stored metadata
+        # goes in. The expiry stays out: with none, the SDK treats the token as valid and leaves
+        # every refresh to refresh_guard, which alone holds the fence.
         ctx.current_tokens = _model(OAuthToken, stored.tokens)
         ctx.client_info = _model(OAuthClientInformationFull, stored.client_info)
-        ctx.token_expiry_time = stored.expires_at
+        ctx.token_expiry_time = None
         metadata = _model(OAuthMetadata, stored.oauth_metadata)
         if metadata is not None:
             ctx.oauth_metadata = metadata
@@ -286,6 +496,32 @@ class OAuthAuth:
         metadata = self._provider.context.oauth_metadata
         if metadata is not None:
             self.storage.save_metadata(metadata.model_dump(by_alias=True, mode="json", exclude_none=True))
+
+
+@dataclass
+class _Grant:
+    sent: bool = False
+    provider: Any = None            # the private provider that ran the grant
+
+
+@dataclass(frozen=True)
+class _Unsaved:
+    spent: str | None               # the refresh token the engine rotated away from
+    tokens: dict[str, Any]          # the rotated pair, as an OAuthToken dump
+    expires_at: float | None
+    client_info: dict[str, Any] | None
+    oauth_metadata: dict[str, Any] | None
+    marker: int                     # oauth.json's mtime after the spent token came off, 0 if gone
+
+
+class _SaveRefused(Exception):
+    """The engine answered the refresh and FileTokenStorage could not write the rotated pair."""
+
+
+def _consume(task: asyncio.Future) -> None:
+    # Every caller may have stopped waiting; this keeps asyncio from logging the failure as lost.
+    if not task.cancelled():
+        task.exception()
 
 
 def _leaves(e: BaseException) -> list[BaseException]:

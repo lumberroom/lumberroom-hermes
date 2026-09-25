@@ -46,8 +46,13 @@ Settled on 25 September 2026 and not reopened here:
    approval and no task performs them.
 4. Hosted is one host: MCP at `https://mcp.lumberroom.cloud/mcp`, authorization server
    `https://lumberroom.cloud`, no per-tenant subdomain.
-5. Self-hosted is first class. `base_url` has no default and setup offers both deployments on
-   equal terms.
+5. Both deployments are supported, and lumberroom.cloud is the default: an unset `base_url` means
+   `https://mcp.lumberroom.cloud` with `auth: oauth`, because the hosted service carries more
+   features. A self-hosted OSS engine runs the same code once `base_url` names it. This owner
+   ruling of 25 September 2026 replaces the first one, under which `base_url` had no default and
+   setup weighed both deployments equally. Cloud features such as dreaming run on the server and
+   reach Hermes through the same MCP tools; the plugin carries no cloud-only code and builds no
+   consolidation of its own.
 6. Gateways fail closed, and a listed owner gets memory in DMs and in shared chats (group, guild,
    thread, channel, webhook), where each turn must come from a listed owner. An empty
    `owner_user_ids` refuses every gateway session. This owner ruling of 25 September 2026 replaces
@@ -138,19 +143,20 @@ gateway reads the right profile (`HERMES/agent/secret_scope.py:200-228`).
 
 | key | default | meaning |
 |---|---|---|
-| `base_url` | none, required | Engine origin, such as `http://127.0.0.1:8787` or `https://mcp.lumberroom.cloud`. The plugin strips one trailing `/` and appends `/mcp` unless the value already ends in `/mcp`. |
-| `auth` | none, required | `token` or `oauth`. Setup writes it. No inference from which secrets happen to exist. |
+| `base_url` | `https://mcp.lumberroom.cloud` | Engine origin, such as `http://127.0.0.1:8787` or `https://mcp.lumberroom.cloud`. The plugin strips one trailing `/` and appends `/mcp` unless the value already ends in `/mcp`. |
+| `auth` | `oauth` | `token` or `oauth`. Setup writes it. No inference from which secrets happen to exist. |
 | `LUMBERROOM_HERMES_TOKEN` (`.env`) | unset | Static bearer for `auth: token`. Its own name, so a `LUMBERROOM_TOKEN` exported for the CLI never becomes Hermes's credential by accident and the two clients stay apart in `lumberroom stats --by-client`. |
 | `project` | `auto` | `auto`: the git root above `cwd` when Hermes passed one, else no project. `none`: never send one. Anything else: a slug or path sent as given. The engine reduces it to a slug (`ENG/src/domain/namespaces.rs:92-113`). |
 | `recall` | `true` | Master switch for `prefetch`. |
 | `digest` | `true` | Inject `context_bootstrap` on the first non-trivial turn after init, a reset or a compression. |
+| `dreaming_review` | `false` | Expose the server's `review_queue` and `review_decide`, so Hermes can list and act on lumberroom.cloud dreaming proposals. Takes effect only on a lumberroom.cloud `base_url`; section 7.1. |
 | `digest_max_chars` | `6000` | Client-side cap. Matches the engine default `BOOTSTRAP_MAX_CHARS` (`ENG/src/config.rs:863`). |
 | `recall_limit` | `4` | `memory_search` limit per turn, 1 to 20. |
 | `recall_max_chars` | `1200` | Cap on the per-turn hits block. |
 | `review_interval` | `10` | Turns between write nudges in a primary session. `0` turns the nudge off. |
 | `tools` | `[memory_search, memory_write, registry_get, memory_forget]` | Allowlist. The server's grant filters further. `context_bootstrap` is left out because the digest already arrives through `prefetch`. |
 | `owner_user_ids` | `[]` | Gateway owners as `platform:id`, for example `telegram:123456789`. A listed owner gets memory in DMs and in group, guild, thread, channel and webhook chats; in a shared chat only a listed owner's own turns do. Empty refuses every gateway session. Section 8. |
-| `local_platforms` | `[cli, tui, desktop, acp, cron]` | Platforms whose sessions count as the owner. `cron` is in by default; remove it to keep cron jobs away from memory. Section 8 states the cost. |
+| `local_platforms` | `[cli, tui, desktop, acp, cron]` | Platforms whose sessions count as the owner. Only these five are accepted: a gateway named here would count every member of its room as the owner, so gateway owners go in `owner_user_ids`. `cron` is in by default; remove it to keep cron jobs away from memory. Section 8 states the cost. |
 | `prefetch_timeout_s` | `3.0` | Bound on one prefetch, under the host's 8.0s (`HERMES/agent/memory_manager.py:32`). |
 | `tool_timeout_s` | `20.0` | Bound on one tool call. |
 | `connect_timeout_s` | `3.0` | TCP and TLS connect bound. |
@@ -228,30 +234,48 @@ would log a user out:
 
 | gap in mcp 2.0.0 | effect | what the plugin does |
 |---|---|---|
-| `_initialize` loads tokens and never sets `token_expiry_time` | a restarted process sends an expired access token, gets a 401, and the SDK starts a full browser authorization instead of refreshing | after building the provider, set `provider.context.token_expiry_time` from the stored `expires_at` |
+| `_initialize` loads tokens and never sets `token_expiry_time`, and the SDK refreshes only once a token has already expired | a restarted process sends an expired access token, gets a 401, and the SDK starts a full browser authorization instead of refreshing; a token the engine already counts as expired draws the same 401 | the plugin seeds `token_expiry_time` with `None`, so the SDK never refreshes on its own schedule, and `refresh_guard` refreshes inside the 60-second window itself |
 | refresh posts to `oauth_metadata.token_endpoint`, or guesses `<origin>/token` when metadata is absent | a cold process guesses wrong: the engine serves `/oauth/token`, and hosted's authorization server sits on another origin | store the metadata after login; set `provider.context.oauth_metadata` from it after building the provider |
 | nothing coordinates two processes holding one refresh token | the CLI, the gateway and cron on one profile can each refresh the same token; the engine revokes the family on the second | `RefreshFence`, below |
 
 `token_expiry_time` and `oauth_metadata` are public fields of the SDK's `OAuthContext`. The plugin
 overrides no underscore method. A contract test pins both fields against the installed SDK.
 
-**RefreshFence.** Before each MCP request, `OAuthAuth.refresh_guard()`:
+**RefreshFence.** The invariant: two Hermes processes on one profile never present the same
+refresh token twice, because the engine revokes the whole family on a replay. Before each MCP
+request, `OAuthAuth.refresh_guard()`:
 
-1. If the token file's mtime changed since the provider was built, rebuild the provider from disk.
-   A peer refreshed.
+1. If the token file's mtime changed since the provider was seeded, reseed the same provider's
+   public context fields from disk in place. A peer refreshed.
 2. If the stored access token expires within 60 seconds (design target), or the file records no
-   expiry, take the file lock `$HERMES_HOME/lumberroom/oauth.lock` (timeout 30s, design target) on
-   a worker thread, then re-read the file. A missing expiry counts as due: the engine always sends
-   `expires_in` (`ENG/src/authserver/routes.rs:894`), so a null `expires_at` means a partial or
-   hand-edited file, and whatever refresh follows then runs under the lock.
-   - The disk now holds a fresh token, one whose expiry lies more than 60 seconds out: a peer won
-     the refresh. Rebuild the provider from it and release the lock.
-   - It does not: keep the lock through the request. The SDK refreshes inside the request and
-     `FileTokenStorage.set_tokens` persists the new pair. Release after the response.
-3. Otherwise proceed without the lock.
+   expiry, start one refresh task per process, or join the one already running. The task takes the
+   file lock `$HERMES_HOME/lumberroom/oauth.lock` (timeout 30s, design target) on a worker thread
+   and re-reads the file.
+   - The disk now holds a fresh token: a peer won the refresh. Reseed from it and release.
+   - It does not: the task drives the SDK's public `async_auth_flow` with a probe request, so the
+     SDK posts the `refresh_token` grant and `FileTokenStorage.set_tokens` persists the new pair.
+     The task re-reads the file, reseeds, and only then releases the lock.
+3. Otherwise proceed without the lock. The request itself never holds it.
 
-An asyncio lock serializes the two sessions inside one process. The SDK serializes its own flow
-under `context.lock`.
+Callers await the task under `asyncio.shield`, so a caller whose deadline passes (prefetch has
+3.0s) cancels its own wait and leaves the refresh running, bounded by the fence timeout. Closing the
+bridge calls `settle()` on the auth handle first, which waits up to 3.0s (a bound the plugin
+chose on exit latency) for a pending refresh, or retries the save of a rotated pair the disk
+refused. A refresh still running after that is cancelled and costs one sign-in. An SDK flow already queued on the SDK's `context.lock` when the task
+forces a refresh may perform the grant itself; it does so inside the held fence.
+
+Failures, as implemented and pinned by unit tests (the gate's step 13 covers the success path):
+
+- The token endpoint answers 5xx or cannot be reached: `RefreshUnavailable`, reported as
+  unreachable. Inside the skew window the still-live access token carries the call instead.
+- It answers 4xx: `login_required`, latched until `oauth.json` changes, so a dead pair is not
+  presented again.
+- The refresh was sent and its answer never came back: `login_required`. The engine may already
+  have rotated, and presenting the old pair again would trip the replay check. A lost answer costs
+  one sign-in.
+- The engine answered but the plugin could not write `oauth.json`: the rotated pair stays in
+  memory, the plugin retries the write under the fence on the next guard, and it reports the disk
+  error.
 
 **Why not Hermes's own OAuth manager.** `tools.mcp_oauth_manager.get_manager().get_or_build_provider`
 (`HERMES/tools/mcp_oauth_manager.py:282-311`) carries all three fixes and more: issuer binding,
@@ -272,10 +296,12 @@ behind a contract test and a `requires_hermes` floor.
   device grant (`ENG/src/authserver/routes.rs:106-112`).
 
 Every other path (provider hooks, `status`, `import-builtin`) builds handlers that raise
-`LoginRequired`. The bridge maps that to `kind = "login_required"`, and the provider marks itself
-unauthenticated.
+`LoginRequired`. The bridge maps that to `kind = "login_required"`. The provider asks again on
+every turn rather than caching the answer, so a `hermes lumberroom login` in another terminal takes
+effect on the next turn.
 
-`hermes lumberroom logout` deletes `oauth.json`. It revokes nothing on the server in v1.
+`hermes lumberroom logout` deletes `oauth.json` under the fence, so a peer mid-refresh cannot write
+the file back. It revokes nothing on the server in v1.
 
 ### 6.3 What the owner sets up per deployment
 
@@ -314,13 +340,38 @@ failures, records a reason, and makes the reason visible in `prefetch`, in tool 
 | `handle_tool_call(name, args, **kw)` | Refuses in this order: unknown name, inert, gated session or turn, unauthenticated. Then `tools/call` on the model session with `tool_timeout_s`. Returns a JSON string (section 10). |
 | `on_session_switch(new_id, *, reset, rewound, **kw)` | Updates `x-session-id` on both sessions and clears the injected-id set. Re-arms the digest when `reset` is true or `kw.get("reason") == "compression"` (`HERMES/agent/conversation_compression.py:1715-1717,3457-3459`), since the summary may have dropped the earlier digest. |
 | `on_pre_compress`, `on_session_end`, `on_delegation`, `on_memory_write` | Default no-ops. With the built-in store off, `on_memory_write` never fires. |
-| `shutdown()` | Closes both sessions and stops the loop within 2.0s, inside the host's 5.0s drain (`HERMES/agent/memory_manager.py:31`). |
+| `shutdown()` | Waits up to 3.0s for a token refresh in flight, then closes both sessions and stops the loop within 2.0s. Hermes bounds neither: its 5.0s drain (`HERMES/agent/memory_manager.py:31`) covers the sync executor, which runs first. |
 | `get_config_schema()`, `save_config()`, `post_setup()` | Section 12. |
 | `get_status_config(provider_config)` | `base_url`, `auth`, whether the credential is present, and a pointer to `hermes lumberroom status` for the live check (`HERMES/hermes_cli/memory_setup.py:381-383`). |
 
 Subagents get no provider: `delegate_task` builds children with `skip_memory=True`
 (`HERMES/tools/delegate_tool.py:241`). Cron agents get one with `platform="cron"`
 (`HERMES/cron/scheduler.py:2437-2440`), and the default `local_platforms` counts them as the owner.
+
+### 7.1 Dreaming review on lumberroom.cloud
+
+Owner ruling, 25 September 2026. `review_queue` and `review_decide` reach the model only when all
+three hold:
+
+1. `dreaming_review` is `true`. Setup asks only on the lumberroom.cloud path, with No as the
+   default.
+2. The `base_url` host is `lumberroom.cloud` or one of its subdomains (`config.is_hosted`). The
+   engine and the fork both answer `serverInfo` as `rmcp`, so the host is the only signal the
+   plugin has; a staging copy of the hosted build under another domain reads as self-hosted.
+   Reversal condition: the fork advertises a dreaming capability the plugin can read instead.
+3. The server's live `tools/list` offers both tools, which it does only when the credential's grant
+   carries the review capability.
+
+Listing either tool in `tools` does nothing without the setting. The self-hosted engine carries the
+same two tools for its cleanup and ingest proposals, and they stay off there.
+
+Hermes builds its routing table before `initialize`, so the pre-init candidate set includes the two
+tools when conditions 1 and 2 hold, and the post-init set drops them when condition 3 fails. The
+descriptions and argument schemas come from the server unchanged; those descriptions tell the model
+to work the queue only when the person asks and to give a reason with every proposal decision.
+
+The plugin builds no consolidation of its own. Hermes, or its owner, may build dreaming-like
+features beside it.
 
 ## 8. The owner gate
 
@@ -492,8 +543,8 @@ longer reads them.
 **`hermes memory setup lumberroom`** calls `post_setup(hermes_home, config)`, which owns the flow
 (`HERMES/hermes_cli/memory_setup.py:157-166`):
 
-1. Pick the deployment: "Self-hosted engine (enter its URL)" or "lumberroom.cloud". Neither is the
-   default.
+1. Pick the deployment: "lumberroom.cloud", the Enter default, or "Self-hosted engine (enter its
+   URL)".
 2. Self-hosted: ask the URL, then `token` or `oauth`. Hosted: `base_url =
    https://mcp.lumberroom.cloud`, then "Sign in with a browser" or "Paste an API token (lr_...)".
 3. Token: prompt for the secret and write it with `save_env_value("LUMBERROOM_HERMES_TOKEN", ...)`.

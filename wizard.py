@@ -6,8 +6,10 @@ from typing import Any, Callable, Mapping
 
 from .config import HOSTED_BASE_URL, TOKEN_ENV
 
-_DEPLOYMENT_OPTIONS = {"1": "Self-hosted engine (enter its URL)", "2": "lumberroom.cloud"}
+_DEPLOYMENT_OPTIONS = {"1": "lumberroom.cloud", "2": "Self-hosted engine (enter its URL)"}
+_DEPLOYMENT_DEFAULT = "1"
 _HOSTED_CREDENTIAL_OPTIONS = {"1": "Sign in with a browser", "2": "Paste an API token (lr_...)"}
+_HOSTED_CREDENTIAL_DEFAULT = "1"
 _BUILTIN_OFF: tuple[tuple[str, Any], ...] = (
     ("provider", "lumberroom"),
     ("memory_enabled", False),
@@ -56,11 +58,14 @@ def save_values(values: Mapping[str, Any], hermes_home: str) -> None:
     save_config(config)
 
 
-def _choose(ask: Callable[[str], str], out: Callable[[str], None], options: Mapping[str, str], prompt: str) -> str:
+def _choose(ask: Callable[[str], str], out: Callable[[str], None], options: Mapping[str, str], prompt: str,
+           *, default: str | None = None) -> str:
     for key, label in options.items():
         out(f"{key}) {label}")
     while True:
         answer = ask(prompt).strip()
+        if not answer and default is not None:
+            return default
         if answer in options:
             return answer
 
@@ -75,21 +80,30 @@ def post_setup(hermes_home: str, config: dict[str, Any], *,
                out: Callable[[str], None] = print) -> None:
     from hermes_cli.config import save_config, save_env_value
 
-    from .config import parse as parse_config, write_section
+    from .config import ConfigError, parse as parse_config, write_section
     from .importer import read_builtin_entries
 
     if ask_secret is None:
         import getpass
         ask_secret = getpass.getpass
 
-    deployment = _choose(ask, out, _DEPLOYMENT_OPTIONS, "Choose 1 or 2: ")
-    if deployment == "1":
-        base_url = ask("Engine URL: ").strip()
-        auth_mode = ask("Auth mode, token or oauth: ").strip().lower()
-    else:
-        base_url = HOSTED_BASE_URL
-        credential = _choose(ask, out, _HOSTED_CREDENTIAL_OPTIONS, "Choose 1 or 2: ")
-        auth_mode = "oauth" if credential == "1" else "token"
+    # Parsed and re-prompted before anything touches config or .env: a bad URL or auth mode must
+    # never leave the profile half-written (memory off, no working memory.lumberroom block).
+    while True:
+        deployment = _choose(ask, out, _DEPLOYMENT_OPTIONS, "Choose 1 or 2 [1]: ", default=_DEPLOYMENT_DEFAULT)
+        if deployment == "2":
+            base_url = ask("Engine URL: ").strip()
+            auth_mode = ask("Auth mode, token or oauth: ").strip().lower()
+        else:
+            base_url = HOSTED_BASE_URL
+            credential = _choose(ask, out, _HOSTED_CREDENTIAL_OPTIONS, "Choose 1 or 2 [1]: ",
+                                 default=_HOSTED_CREDENTIAL_DEFAULT)
+            auth_mode = "oauth" if credential == "1" else "token"
+        try:
+            cfg = parse_config({"base_url": base_url, "auth": auth_mode})
+            break
+        except ConfigError as exc:
+            out(str(exc))
 
     if auth_mode == "token":
         save_env_value(TOKEN_ENV, ask_secret("API token: "))
@@ -100,17 +114,24 @@ def post_setup(hermes_home: str, config: dict[str, Any], *,
             import sys
             return sys.stdin.readline().strip()
 
-        login(parse_config({"base_url": base_url, "auth": auth_mode}), hermes_home=hermes_home,
-              open_browser=True, read_pasted=read_pasted, out=out)
+        login(cfg, hermes_home=hermes_home, open_browser=True, read_pasted=read_pasted, out=out)
 
-    write_section(config, {"base_url": base_url, "auth": auth_mode})
+    values: dict[str, Any] = {"base_url": base_url, "auth": auth_mode}
+    # Dreaming proposals are a lumberroom.cloud feature; the self-hosted path never asks and
+    # never writes the key, so status's "off (not lumberroom.cloud)" line stays the true reason.
+    dreaming_review = deployment == "1" and _yes(
+        ask("Let Hermes review and act on lumberroom.cloud dreaming proposals? [y/N] "))
+    if dreaming_review:
+        values["dreaming_review"] = True
+
+    write_section(config, values)
     for line in apply_builtin_off(config):
         out(line)
     save_config(config)
     out(f"memory.lumberroom.base_url -> {base_url}")
     out(f"memory.lumberroom.auth -> {auth_mode}")
-
-    cfg = parse_config({"base_url": base_url, "auth": auth_mode})
+    if dreaming_review:
+        out("memory.lumberroom.dreaming_review -> true")
 
     if _yes(ask("Run the live check now? [y/N] ")):
         from .cli import run_live_check
@@ -119,15 +140,32 @@ def post_setup(hermes_home: str, config: dict[str, Any], *,
 
     entries = read_builtin_entries(hermes_home)
     if entries and _yes(ask(f"Import {len(entries)} entries into the review queue now? [y/N] ")):
-        from .auth import build_auth
-        from .bridge import Bridge
-        from .importer import import_builtin
+        import httpx2
 
-        handle = build_auth(cfg, hermes_home=hermes_home, interactive=False)
+        from .auth import AuthConfigError, LoginRequired, RefreshUnavailable, TokenSaveFailed, build_auth
+        from .bridge import Bridge
+        from .cli import _profile_name
+        from .importer import MissingGrant, import_builtin
+        from .tokens import FenceTimeout
+
+        try:
+            handle = build_auth(cfg, hermes_home=hermes_home, interactive=False)
+        except AuthConfigError as exc:
+            out(str(exc))
+            return
+
         bridge = Bridge(cfg, handle, session_id="setup-import")
         bridge.start()
         try:
-            report = import_builtin(bridge, hermes_home, profile="default", dry_run=False)
+            report = import_builtin(bridge, hermes_home, profile=_profile_name(hermes_home), dry_run=False)
+        except MissingGrant:
+            out("lumberroom refused the import (403): this credential lacks mayIngest. Add "
+                '"mayIngest": true to its AUTH_TOKENS entry, or use a full consent grant.')
+            return
+        except (RuntimeError, TimeoutError, LoginRequired, RefreshUnavailable, TokenSaveFailed,
+                FenceTimeout, httpx2.TransportError) as exc:
+            out(str(exc))
+            return
         finally:
             bridge.close()
         out(f"posted {report.posted} entries: {report.proposals_new} new, {report.proposals_reinforced} reinforced")

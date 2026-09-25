@@ -10,9 +10,11 @@ def test_five_spellings_of_one_engine_give_one_mcp_url(raw):
 
 
 @pytest.mark.parametrize("block, key", [
-    ({"auth": "token"}, "base_url"),
+    ({"base_url": "", "auth": "token"}, "base_url"),
     ({"base_url": "host:8787", "auth": "token"}, "base_url"),
-    ({"base_url": "http://h"}, "auth"),
+    ({"base_url": "http://h", "auth": "bearer"}, "auth"),
+    ({"base_url": "http://h", "local_platforms": ["cli", "telegram"]}, "local_platforms"),
+    ({"base_url": "http://h", "local_platforms": ["api_server"]}, "local_platforms"),
     ({"base_url": "http://h", "auth": "token", "recall_limit": 50}, "recall_limit"),
     ({"base_url": "http://h", "auth": "token", "prefetch_timeout_s": 8.0}, "prefetch_timeout_s"),
     ({"base_url": "http://h", "auth": "token", "owner_user_ids": ["123"]}, "owner_user_ids"),
@@ -33,3 +35,34 @@ def test_defaults_match_the_spec():
 def test_an_api_server_owner_entry_is_refused():
     with pytest.raises(ConfigError, match="api_server"):
         parse({"base_url": "http://h", "auth": "token", "owner_user_ids": ["api_server:alice"]})
+
+
+def test_an_empty_block_points_at_lumberroom_cloud_with_browser_sign_in():
+    c = parse({})
+    assert (c.mcp_url, c.auth) == ("https://mcp.lumberroom.cloud/mcp", "oauth")
+
+
+def test_a_self_hosted_base_url_overrides_the_cloud_default():
+    assert parse({"base_url": "http://127.0.0.1:8787", "auth": "token"}).mcp_url == "http://127.0.0.1:8787/mcp"
+
+
+@pytest.mark.parametrize("base_url, hosted", [
+    (None, True), ("https://mcp.lumberroom.cloud", True), ("https://LumberRoom.cloud/mcp", True),
+    ("http://127.0.0.1:8787", False), ("https://lumberroom.cloud.evil.example", False),
+    ("https://notlumberroom.cloud", False),
+])
+def test_only_lumberroom_cloud_hosts_count_as_hosted(base_url, hosted):
+    block = {} if base_url is None else {"base_url": base_url}
+    assert parse(block).is_hosted is hosted
+
+
+def test_dreaming_review_is_off_unless_the_owner_turns_it_on():
+    assert parse({}).dreaming_review is False
+    assert parse({"dreaming_review": True}).dreaming_review is True
+
+
+@pytest.mark.parametrize("raw", ["https://evil.example?.lumberroom.cloud", "https://evil.example#.lumberroom.cloud",
+                                 "https://mcp.lumberroom.cloud@evil.example"])
+def test_a_base_url_that_hides_its_real_host_is_refused(raw):
+    with pytest.raises(ConfigError, match="base_url"):
+        parse({"base_url": raw})

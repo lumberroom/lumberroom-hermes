@@ -132,6 +132,29 @@ def test_clear_reports_whether_a_file_existed(tmp_path):
     assert s.clear() is True and not (tmp_path / "oauth.json").exists()
 
 
+def test_save_tokens_keeps_the_absolute_expiry_it_is_given(tmp_path):
+    # A pair saved late, after a failed write, keeps the expiry the engine granted at rotation.
+    s = FileTokenStorage(tmp_path / "oauth.json", URL, clock=lambda: 9000.0)
+    s.save_tokens({"access_token": "a", "token_type": "Bearer", "refresh_token": "r"}, 4600.0)
+    assert s.read().expires_at == 4600.0 and s.read().tokens["refresh_token"] == "r"
+
+
+def test_drop_refresh_token_keeps_the_access_token_and_the_rest(tmp_path):
+    s = FileTokenStorage(tmp_path / "oauth.json", URL, clock=lambda: 1000.0)
+    asyncio.run(s.set_tokens(OAuthToken(access_token="a", token_type="Bearer", expires_in=60, refresh_token="r")))
+    s.save_metadata(METADATA)
+    s.drop_refresh_token()
+    stored = s.read()
+    assert stored.tokens == {"access_token": "a", "token_type": "Bearer", "expires_in": 60}
+    assert stored.expires_at == 1060.0 and stored.oauth_metadata == METADATA
+
+
+def test_drop_refresh_token_without_a_file_writes_nothing(tmp_path):
+    s = FileTokenStorage(tmp_path / "oauth.json", URL)
+    s.drop_refresh_token()
+    assert not (tmp_path / "oauth.json").exists()
+
+
 # A child process loads the package by path, as the conftest does: spawn cannot import a test
 # module that pytest loaded under a generated name.
 CHILD = r"""
@@ -244,3 +267,17 @@ def test_a_caller_cancelled_while_waiting_does_not_leave_the_fence_held(tmp_path
         assert await asyncio.to_thread(another_process_can_take_the_fence, tmp_path)
         return fence
     asyncio.run(give_up_early())
+
+
+def test_a_fence_released_on_another_thread_frees_the_path_for_the_next_fence(tmp_path):
+    # A worker thread acquires and the loop thread releases. Under filelock's thread-local default
+    # that release does nothing, and the next fence on this profile times out.
+    async def twice():
+        first = RefreshFence(tmp_path / "oauth.lock", timeout_s=1)
+        async with first:
+            pass
+        second = RefreshFence(tmp_path / "oauth.lock", timeout_s=1)
+        async with second:
+            pass
+        return first, second    # filelock releases a collected lock, which would hide a leak
+    asyncio.run(twice())

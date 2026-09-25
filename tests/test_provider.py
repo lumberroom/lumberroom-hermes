@@ -3,10 +3,11 @@ import threading
 
 import pytest
 
+from lumberroom_hermes import config
 from lumberroom_hermes.bridge import CallResult, ToolsListing
 from lumberroom_hermes.provider import LumberroomProvider
 from lumberroom_hermes.recall import LOGIN_LINE, NUDGE_LINE, UNREACHABLE_LINE
-from lumberroom_hermes.schemas import load_snapshot
+from lumberroom_hermes.schemas import load_snapshot, write_cache
 
 OK = lambda structured: CallResult("ok", structured, json.dumps(structured), None)  # noqa: E731
 HIT = {"id": "11111111-1111-4111-8111-111111111111", "namespace": "user:me", "content": "Likes terse plans.",
@@ -165,13 +166,117 @@ def test_the_first_failure_of_an_outage_says_memory_was_not_checked(config_yaml,
     assert p.prefetch("q") == ""
 
 
-def test_oauth_without_a_token_marks_unauthenticated_and_says_log_in_once(config_yaml, hermes_home):
+def test_oauth_without_a_token_says_log_in_once_per_session(config_yaml, hermes_home):
     config_yaml(auth="oauth")
     p, _ = make(FakeBridge(fail="login_required"))
     init(p, hermes_home)
     assert p.prefetch("q") == LOGIN_LINE
     assert p.prefetch("q") == ""
     assert "login" in json.loads(p.handle_tool_call("memory_search", {"query": "q"}))["error"]
+
+
+def test_login_required_at_initialize_does_not_stop_the_first_prefetch_reaching_the_engine(config_yaml,
+                                                                                          hermes_home):
+    config_yaml(auth="oauth")
+    bridge = FakeBridge(fail="login_required")
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    bridge.fail = None      # `hermes lumberroom login` ran in another terminal
+    assert "Likes terse plans." in p.prefetch("q")
+
+
+def test_a_prefetch_after_a_login_required_turn_asks_the_engine_again(config_yaml, hermes_home):
+    config_yaml(auth="oauth")
+    bridge = FakeBridge(fail="login_required")
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    assert p.prefetch("q") == LOGIN_LINE
+    bridge.fail = None
+    assert "Likes terse plans." in p.prefetch("q")
+
+
+def test_a_tool_call_after_a_login_required_answer_asks_the_engine_again(config_yaml, hermes_home):
+    config_yaml(auth="oauth")
+    bridge = FakeBridge(fail="login_required")
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    write = {"content": "c", "namespace": "user:me"}
+    assert "login" in json.loads(p.handle_tool_call("memory_write", write))["error"]
+    bridge.fail = None
+    assert json.loads(p.handle_tool_call("memory_write", write))["id"] == "w-1"
+
+
+def test_a_search_timeout_still_delivers_the_digest_beside_the_outage_line(config_yaml, hermes_home):
+    bridge = FakeBridge()
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    bridge.answers["memory_search"] = CallResult("timeout", None, "", "no answer within 3.0s")
+    first = p.prefetch("q")
+    assert "- digest line" in first and UNREACHABLE_LINE in first
+    bridge.answers["memory_search"] = OK({"hits": []})
+    assert "digest line" not in p.prefetch("q")
+    assert [t for t, *_ in bridge.calls].count("context_bootstrap") == 1
+
+
+def test_a_search_login_required_still_delivers_the_digest_beside_the_login_line(config_yaml, hermes_home):
+    config_yaml(auth="oauth")
+    bridge = FakeBridge()
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    bridge.answers["memory_search"] = CallResult("login_required", None, "", "LoginRequired")
+    out = p.prefetch("q")
+    assert "- digest line" in out and LOGIN_LINE in out
+
+
+def test_a_tool_the_owner_allowlisted_from_the_live_cache_is_routed_to_the_engine(config_yaml, hermes_home):
+    extra = {"name": "registry_set", "description": "set", "inputSchema": {"type": "object"}}
+    tools = [t for t in load_snapshot()["tools"]] + [extra]
+    write_cache(str(hermes_home), {"instructions": "I", "tools": tools})
+    config_yaml(tools=["memory_search", "registry_set"])
+    bridge = FakeBridge(tools=tools)
+    bridge.answers["registry_set"] = OK({"key": "k"})
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    assert "registry_set" in {s["name"] for s in p.get_tool_schemas()}
+    assert json.loads(p.handle_tool_call("registry_set", {"key": "k"})) == {"key": "k"}
+
+
+def test_a_snapshot_tool_outside_the_allowlist_is_refused_before_the_engine(config_yaml, hermes_home):
+    config_yaml(tools=["memory_search"])
+    bridge = FakeBridge()
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    err = json.loads(p.handle_tool_call("memory_write", {"content": "c", "namespace": "user:me"}))["error"]
+    assert "does not expose" in err and bridge.calls == []
+
+
+def test_a_bad_config_reports_its_own_reason_for_a_real_tool_name(monkeypatch, hermes_home):
+    monkeypatch.setattr("hermes_cli.config.load_config",
+                        lambda: {"memory": {"lumberroom": {"base_url": "http://x.test", "auth": "nonsense"}}})
+    p, _ = make(FakeBridge())
+    err = json.loads(p.handle_tool_call("memory_search", {"query": "q"}))["error"]
+    assert "does not expose" not in err and err
+
+
+def test_refused_turns_in_a_shared_chat_do_not_count_toward_the_nudge(config_yaml, hermes_home):
+    config_yaml(owner_user_ids=["telegram:42"], review_interval=2)
+    p, _ = make(FakeBridge())
+    init(p, hermes_home, platform="telegram", user_id="7", chat_type="group")
+    p.sync_turn("u", "a", turn_author={"id": "7", "name": "guest", "is_bot": False})
+    p.sync_turn("u", "a")
+    p.on_turn_start(3, "q", author_id="42")
+    assert NUDGE_LINE not in p.prefetch("q")
+
+
+def test_owner_turns_in_a_shared_chat_count_toward_the_nudge(config_yaml, hermes_home):
+    config_yaml(owner_user_ids=["telegram:42"], review_interval=2)
+    p, _ = make(FakeBridge())
+    init(p, hermes_home, platform="telegram", user_id="7", chat_type="group")
+    owner = {"id": "42", "name": "owner", "is_bot": False}
+    p.sync_turn("u", "a", turn_author=owner)
+    p.sync_turn("u", "a", turn_author=owner)
+    p.on_turn_start(3, "q", author_id="42")
+    assert NUDGE_LINE in p.prefetch("q")
 
 
 def test_post_init_schemas_never_add_a_name_the_pre_init_set_lacked(config_yaml, hermes_home):
@@ -224,6 +329,73 @@ def test_the_nudge_appears_after_review_interval_turns_in_a_primary_session_only
     assert out and NUDGE_LINE not in out
 
 
+def test_review_tools_are_exposed_on_hosted_with_the_setting_on_and_the_live_list_offering_them(
+        config_yaml, hermes_home):
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=True)
+    p, _ = make(FakeBridge())
+    init(p, hermes_home)
+    names = {s["name"] for s in p.get_tool_schemas()}
+    assert {"review_queue", "review_decide"} <= names
+
+
+def test_review_tools_stay_hidden_when_the_live_list_lacks_them(config_yaml, hermes_home):
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=True)
+    tools = [t for t in load_snapshot()["tools"] if t["name"] not in ("review_queue", "review_decide")]
+    p, _ = make(FakeBridge(tools=tools))
+    before = {s["name"] for s in p.get_tool_schemas()}
+    assert {"review_queue", "review_decide"} <= before
+    p.initialize("s-1", hermes_home=str(hermes_home), platform="cli")
+    after = {s["name"] for s in p.get_tool_schemas()}
+    assert not {"review_queue", "review_decide"} & after
+    assert after <= before
+
+
+def test_review_tools_stay_hidden_with_the_setting_off(config_yaml, hermes_home):
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=False)
+    p, _ = make(FakeBridge())
+    init(p, hermes_home)
+    names = {s["name"] for s in p.get_tool_schemas()}
+    assert not {"review_queue", "review_decide"} & names
+
+
+def test_review_tools_stay_hidden_on_a_self_hosted_base_url_with_the_setting_on(config_yaml, hermes_home):
+    config_yaml(base_url="http://fake.lumberroom.test", dreaming_review=True)
+    p, _ = make(FakeBridge())
+    init(p, hermes_home)
+    names = {s["name"] for s in p.get_tool_schemas()}
+    assert not {"review_queue", "review_decide"} & names
+
+
+def test_review_tools_stay_hidden_when_listed_in_tools_without_the_setting(config_yaml, hermes_home):
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=False,
+                tools=list(config.DEFAULT_TOOLS) + ["review_queue", "review_decide"])
+    p, _ = make(FakeBridge())
+    init(p, hermes_home)
+    names = {s["name"] for s in p.get_tool_schemas()}
+    assert not {"review_queue", "review_decide"} & names
+
+
+def test_review_tools_pre_init_candidate_set_is_a_superset_of_post_init(config_yaml, hermes_home):
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=True)
+    p, _ = make(FakeBridge())
+    before = {s["name"] for s in p.get_tool_schemas()}
+    p.initialize("s-1", hermes_home=str(hermes_home), platform="cli")
+    after = {s["name"] for s in p.get_tool_schemas()}
+    assert after <= before
+
+
+def test_review_queue_and_review_decide_route_to_the_engine_when_exposed(config_yaml, hermes_home):
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=True)
+    bridge = FakeBridge()
+    bridge.answers["review_queue"] = OK({"items": []})
+    bridge.answers["review_decide"] = OK({"ok": True})
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    assert json.loads(p.handle_tool_call("review_queue", {}))["items"] == []
+    assert json.loads(p.handle_tool_call("review_decide", {"id": "x", "decision": "approve"}))["ok"] is True
+    assert [c[0] for c in bridge.calls] == ["review_queue", "review_decide"]
+
+
 def test_hermes_routes_every_exposed_tool(config_yaml, hermes_home):
     from agent.memory_manager import MemoryManager
     p, _ = make(FakeBridge())
@@ -233,3 +405,16 @@ def test_hermes_routes_every_exposed_tool(config_yaml, hermes_home):
     exposed = {s["name"] for s in mm.get_all_tool_schemas()}
     assert exposed and exposed <= mm.get_all_tool_names()
     mm.shutdown_all()
+
+
+def test_review_tools_stay_hidden_and_refused_when_no_live_list_came_back(config_yaml, hermes_home):
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=True)
+    bridge = FakeBridge(fail="timeout")
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    names = {s["name"] for s in p.get_tool_schemas()}
+    assert "memory_search" in names
+    assert not {"review_queue", "review_decide"} & names
+    out = json.loads(p.handle_tool_call("review_queue", {}))
+    assert "does not expose" in out["error"]
+    assert not any(c[0] == "review_queue" for c in bridge.calls)
