@@ -1,5 +1,10 @@
 # The Hermes memory provider, the order of work
 
+> Written when the plugin lived at `client/hermes/` in the engine repository
+> (`github.com/lumberroom/lumberroom`). It moved to `github.com/lumberroom/lumberroom-hermes` on
+> 25 September 2026 for its own release cycle; `client/hermes/X` in this document is `X` at the root
+> of this repository, and `ENG/` paths point into the engine.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. The lead
 > orchestrates; subagents implement under absolute file ownership. Steps use `- [ ]` for tracking.
 

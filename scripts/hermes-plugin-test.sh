@@ -4,6 +4,7 @@
 #
 #   POSTGRES_PASSWORD=... ./scripts/hermes-plugin-test.sh
 #   ./scripts/hermes-plugin-test.sh --hermes-src ~/work/open-source/hermes-agent --keep
+#   ./scripts/hermes-plugin-test.sh --engine-src ~/work/cbrspn-tech/lumberroom   default ../lumberroom
 #   ./scripts/hermes-plugin-test.sh --capture     rewrite the tools snapshot and the test transcript, then exit
 #
 # Two scratch servers, never 8787: token mode on 8796 against lumberroom_hermes_plugin_test, OAuth
@@ -19,6 +20,9 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERMES_SRC="${HERMES_AGENT_SRC:-$HOME/work/open-source/hermes-agent}"
+# The engine checkout supplies the scratch-server helper, the compose database and the server image,
+# so this gate runs against the engine source it names. A tool the engine renames breaks it here.
+ENGINE_SRC="${LUMBERROOM_ENGINE_SRC:-$REPO_DIR/../lumberroom}"
 TOKEN_PORT=8796
 OAUTH_PORT=8797
 KEEP=0
@@ -26,13 +30,17 @@ CAPTURE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --hermes-src) HERMES_SRC="$2"; shift 2 ;;
+    --engine-src) ENGINE_SRC="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     --capture) CAPTURE=1; shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1. See --help." >&2; exit 1 ;;
   esac
 done
 
+[ -f "$ENGINE_SRC/scripts/lib/scratch-server.sh" ] || {
+  echo "no lumberroom engine checkout at $ENGINE_SRC; pass --engine-src or set LUMBERROOM_ENGINE_SRC" >&2; exit 1; }
+ENGINE_SRC="$(cd "$ENGINE_SRC" && pwd)"
 for bin in docker curl openssl; do
   command -v "$bin" >/dev/null 2>&1 || { echo "$bin is required" >&2; exit 1; }
 done
@@ -41,7 +49,7 @@ VENV="${HERMES_PLUGIN_VENV:-$REPO_DIR/.venv-hermes-plugin}"
 PY="$VENV/bin/python"
 HERMES="$VENV/bin/hermes"
 DRIVE="$REPO_DIR/scripts/lib/hermes_plugin_drive.py"
-PLUGIN_DIR="$REPO_DIR/client/hermes"
+PLUGIN_DIR="$REPO_DIR"
 WORK="$(mktemp -d)"
 NONCE="$(openssl rand -hex 4)"
 
@@ -65,7 +73,7 @@ ensure_venv() {
 }
 
 psql_q() {
-  docker compose -f "$REPO_DIR/docker-compose.yml" exec -T db \
+  docker compose -f "$ENGINE_SRC/docker-compose.yml" exec -T db \
     psql -U "${POSTGRES_USER:-lumberroom}" -d "$1" -tAc "$2"
 }
 
@@ -107,8 +115,8 @@ SCRATCH_PORT=$TOKEN_PORT
 SCRATCH_KEEP=$KEEP
 SCRATCH_TOKENS="[{\"client\":\"hermes-plugin-test\",\"token\":\"$TOKEN\",\"read\":[{\"namespace\":\"*\",\"max\":\"private\"}],\"write\":[\"user:me\",\"global\",\"project:*\"],\"mayIngest\":true,\"mayDelete\":true}]"
 export SCRATCH_DB SCRATCH_NAME SCRATCH_PORT SCRATCH_KEEP SCRATCH_TOKENS
-# shellcheck source=lib/scratch-server.sh
-. "$REPO_DIR/scripts/lib/scratch-server.sh"
+# shellcheck source=/dev/null
+. "$ENGINE_SRC/scripts/lib/scratch-server.sh"
 scratch_start || die "the token-mode scratch engine did not start"
 URL="$SCRATCH_URL"
 pass "engine ready at $URL"
@@ -207,7 +215,7 @@ export SCRATCH_DB SCRATCH_NAME SCRATCH_PORT SCRATCH_TOKENS
 # Copied from scripts/oauth-flow-test.sh scratch_start_oauth, with one addition: a 75-second access
 # token, so step 13 can reach the refresh window without waiting an hour.
 scratch_start_oauth() {
-  SCRATCH_REPO_DIR="${SCRATCH_REPO_DIR:-$REPO_DIR}"
+  SCRATCH_REPO_DIR="${SCRATCH_REPO_DIR:-$ENGINE_SRC}"
   SCRATCH_NETWORK="${LUMBERROOM_DOCKER_NETWORK:-lumberroom_default}"
   SCRATCH_PG_USER="${POSTGRES_USER:-lumberroom}"
   scratch_require || return 1

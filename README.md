@@ -5,7 +5,7 @@ lumberroom as Hermes's memory provider. With no `memory.lumberroom` block, or a 
 at a self-hosted OSS engine instead, running the same code with a static token or OAuth. A
 cloud-only capability, such as dreaming consolidation, runs on the server and reaches the plugin
 through the same tools; the plugin carries no cloud-specific code path (spec
-[`../../docs/specs/hermes-plugin.md`](../../docs/specs/hermes-plugin.md) decision 4, `config.py`,
+[`docs/spec.md`](docs/spec.md) decision 4, `config.py`,
 `provider.py`, `bridge.py`).
 
 ## What it does
@@ -33,7 +33,7 @@ through the same tools; the plugin carries no cloud-specific code path (spec
 Drop or symlink this directory into `~/.hermes/plugins/lumberroom`:
 
 ```bash
-ln -s /path/to/lumberroom/client/hermes ~/.hermes/plugins/lumberroom
+ln -s /path/to/lumberroom-hermes ~/.hermes/plugins/lumberroom
 ```
 
 Hermes loads a directory provider from `<dir>/__init__.py` and finds `cli.py` in the same place
@@ -182,5 +182,31 @@ reaches disk after the caller who asked for it stops waiting (`bridge.py:_shutdo
 - A GitHub Actions job for the plugin.
 - PyPI publication and the Hermes plugin-catalog PR.
 
-Implemented against [`../../docs/specs/hermes-plugin.md`](../../docs/specs/hermes-plugin.md); read
-that spec for the transport, the OAuth token-refresh fence, and the full hook-by-hook contract.
+## Development
+
+The plugin talks to the [lumberroom engine](https://github.com/lumberroom/lumberroom) over MCP and
+ships on its own release cycle. Tags are `vX.Y.Z` in this repository.
+
+```bash
+python3.14 -m venv .venv-hermes-plugin
+.venv-hermes-plugin/bin/pip install -e /path/to/hermes-agent[mcp]   # Hermes refuses a wheel build
+.venv-hermes-plugin/bin/pip install "mcp>=2.0.0,<3" "httpx2>=2.7.0,<3" "filelock>=3.12,<4" \
+  "pytest==9.1.1" "pytest-asyncio==1.3.0"
+.venv-hermes-plugin/bin/python -m pytest -q
+```
+
+The end-to-end gate drives the plugin through Hermes's own loader and `MemoryManager` against
+scratch engines built from an engine checkout, in token and OAuth mode:
+
+```bash
+POSTGRES_PASSWORD=... ./scripts/hermes-plugin-test.sh --engine-src ../lumberroom
+```
+
+It needs the engine's `lumberroom-server:0.4.0` image built from that checkout
+(`docker build --target runtime -t lumberroom-server:0.4.0 .` in the engine) and its compose
+database. `--capture` rewrites `tools_snapshot.json` and the test transcript from the engine it
+starts, which is how the plugin picks up a change to the engine's tools.
+
+Implemented against [`docs/spec.md`](docs/spec.md); read that spec for the transport, the OAuth
+token-refresh fence, and the full hook-by-hook contract. [`docs/plan.md`](docs/plan.md) is the
+build plan, written when the plugin lived at `client/hermes/` in the engine repository.

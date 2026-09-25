@@ -1,7 +1,7 @@
 """Capture the engine's MCP handshake, tools/list and one tools/call for the Hermes plugin.
 
-Writes client/hermes/tools_snapshot.json (the schemas the plugin routes before it connects) and
-client/hermes/tests/fixtures/engine_transcript.json (what the unit-test fake replays). Run by
+Writes tools_snapshot.json (the schemas the plugin routes before it connects) and
+tests/fixtures/engine_transcript.json (what the unit-test fake replays). Run by
 scripts/hermes-plugin-test.sh --capture against a scratch engine in token mode.
 """
 

@@ -1,4 +1,4 @@
-"""Loads client/hermes as the package lumberroom_hermes, the way a wheel install names it."""
+"""Loads the repository root as the package lumberroom_hermes, the way a wheel install names it."""
 
 from __future__ import annotations
 

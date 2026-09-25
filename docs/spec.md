@@ -1,6 +1,11 @@
 # The lumberroom memory provider for Hermes Agent
 
-**Date:** 25 September 2026 · **Status:** design, nothing built · **Side:** upstream (engine repo)
+> Written when the plugin lived at `client/hermes/` in the engine repository
+> (`github.com/lumberroom/lumberroom`). It moved to `github.com/lumberroom/lumberroom-hermes` on
+> 25 September 2026 for its own release cycle; `client/hermes/X` in this document is `X` at the root
+> of this repository, and `ENG/` paths point into the engine.
+
+**Date:** 25 September 2026 · **Status:** built; see CHANGELOG.md and scripts/hermes-plugin-test.sh · **Side:** its own repository, against the upstream engine
 
 Every behaviour below is a design. Nothing in `client/hermes/` exists yet, no line of it has run,
 and every number is a design target unless it carries a file and line. Source citations name the

@@ -1,0 +1,6 @@
+.venv-hermes-plugin/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+dist/
+build/

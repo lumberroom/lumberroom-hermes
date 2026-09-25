@@ -25,7 +25,8 @@ test = ["pytest==9.1.1", "pytest-asyncio==1.3.0"]
 lumberroom = "lumberroom_hermes:register"
 
 [project.urls]
-Source = "https://github.com/the-cybersapien/lumberroom/tree/main/client/hermes"
+Source = "https://github.com/lumberroom/lumberroom-hermes"
+Engine = "https://github.com/lumberroom/lumberroom"
 
 # This directory is the package. Hermes loads it in place from ~/.hermes/plugins/lumberroom, and
 # the wheel maps the same files under lumberroom_hermes/.
@@ -38,7 +39,7 @@ only-include = [
 sources = { "" = "lumberroom_hermes" }
 
 [tool.hatch.build.targets.sdist]
-exclude = ["tests", ".venv*", "__pycache__"]
+exclude = ["tests", "scripts", "docs", ".venv*", "__pycache__"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
