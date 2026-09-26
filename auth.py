@@ -7,6 +7,7 @@ import contextlib
 import http.server
 import os
 import queue
+import sys
 import threading
 import time
 import webbrowser
@@ -588,6 +589,16 @@ async def _refuse_callback():
     raise LoginRequired(f"lumberroom needs a browser sign-in: {_LOGIN_HINT}")
 
 
+def _flushed(out: Callable[[str], None]) -> Callable[[str], None]:
+    # Every sign-in line lands while the login blocks on a human. Hermes v2026.9.21 leaves a piped
+    # stdout block-buffered (later releases line-buffer it), so a print could wait there until exit.
+    def say(line: str) -> None:
+        out(line)
+        with contextlib.suppress(Exception):
+            sys.stdout.flush()
+    return say
+
+
 class _BrowserSignIn:
     """The interactive handlers: print and open the URL, then take the loopback redirect or a paste."""
 
@@ -596,7 +607,7 @@ class _BrowserSignIn:
         self._port = port
         self._open_browser = open_browser
         self._read_pasted = read_pasted
-        self._out = out
+        self._out = _flushed(out)
         self._attempt: _SignInAttempt | None = None
 
     async def redirect(self, authorization_url: str) -> None:

@@ -1017,3 +1017,43 @@ def test_a_second_authorization_in_one_flow_gets_a_fresh_listener_and_reader(her
     first = _sign_in_by_paste(handle, "http://x/authorize")
     second = _sign_in_by_paste(handle, "http://x/authorize")
     assert (first.code, second.code) == ("c-1", "c-2")
+
+
+_PIPED_SIGN_IN = """
+import asyncio, sys, time
+sys.path.insert(0, sys.argv[1])
+import conftest
+from lumberroom_hermes.auth import _BrowserSignIn
+
+sign_in = _BrowserSignIn(0, open_browser=False, read_pasted=None, out=print)
+asyncio.run(sign_in.redirect("http://127.0.0.1:1/oauth/authorize?state=piped"))
+time.sleep(30)
+"""
+
+
+def test_the_authorize_url_reaches_a_piped_stdout_while_the_login_waits():
+    # Hermes v2026.9.21 leaves a piped stdout block-buffered, so a plain print of the URL stayed in
+    # the buffer while login blocked on the browser or a paste, and a scripted login never saw it.
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    tests_dir = str(pathlib.Path(__file__).resolve().parent)
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+    child = subprocess.Popen([sys.executable, "-c", _PIPED_SIGN_IN, tests_dir], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, cwd=tests_dir, env=env)
+    lines: list[bytes] = []
+
+    def read_two() -> None:
+        for _ in range(2):
+            lines.append(child.stdout.readline())
+
+    reader = threading.Thread(target=read_two, daemon=True)
+    reader.start()
+    try:
+        reader.join(timeout=15)
+    finally:
+        child.kill()
+        child.wait()
+    assert any(b"state=piped" in line for line in lines), lines

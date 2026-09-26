@@ -5,6 +5,20 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-26
+
+### Fixed
+
+- **`hermes lumberroom login` prints the sign-in URL at once when stdout is a pipe or a file.**
+  Hermes v2026.9.21 leaves a piped stdout block-buffered, so the URL sat in the buffer while login
+  waited for the browser or a paste, and a script driving the login never saw it. A terminal was
+  never affected. Every sign-in line now flushes. Later Hermes releases line-buffer a piped stdout
+  themselves.
+- **The end-to-end gate runs against Hermes v2026.9.21 as well as main.** The driver passed
+  `profile_home` to `set_secret_scope`, which v2026.9.21 does not take; it now checks the signature
+  first. The missing `context_bootstrap` row in that failing run came from the same crash: recall
+  never ran. The digest reaches the engine on both releases.
+
 ## [1.0.1] - 2026-09-26
 
 ### Fixed

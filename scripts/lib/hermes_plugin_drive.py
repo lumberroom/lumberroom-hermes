@@ -5,6 +5,7 @@ profile. No model is involved: these are the calls a Hermes turn makes.
 """
 
 import argparse
+import inspect
 import json
 import os
 import sys
@@ -22,7 +23,12 @@ def manager(session: str, **kwargs):
 
     home = os.environ["HERMES_HOME"]
     # A real Hermes process installs the profile's .env as the secret scope before any hook runs.
-    set_secret_scope(build_profile_secret_scope(Path(home)), profile_home=home)
+    # profile_home arrived after v2026.9.21, and the gate runs against both releases.
+    scope = build_profile_secret_scope(Path(home))
+    if "profile_home" in inspect.signature(set_secret_scope).parameters:
+        set_secret_scope(scope, profile_home=home)
+    else:
+        set_secret_scope(scope)
     provider = load_memory_provider("lumberroom")
     if provider is None:
         sys.exit("load_memory_provider('lumberroom') returned None")

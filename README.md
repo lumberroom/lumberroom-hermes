@@ -33,7 +33,7 @@ through the same tools; the plugin carries no cloud-specific code path (spec
 From a release, into the directory Hermes loads providers from:
 
 ```bash
-git clone --depth 1 --branch v1.0.1 https://github.com/lumberroom/lumberroom-hermes \
+git clone --depth 1 --branch v1.0.2 https://github.com/lumberroom/lumberroom-hermes \
   ~/.hermes/plugins/lumberroom
 hermes memory setup lumberroom
 ```
