@@ -282,6 +282,42 @@ def test_import_builtin_exits_two_and_names_the_grant_on_a_403(monkeypatch, herm
     assert "mayIngest" in capsys.readouterr().out
 
 
+def test_import_builtin_hint_names_a_real_ingest_subcommand(monkeypatch, hermes_home, capsys):
+    (hermes_home / "memories" / "MEMORY.md").write_text("Fact one.\n")
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"memory": {"lumberroom": {"base_url": "http://fake.lumberroom.test", "auth": "token"}}})
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
+    monkeypatch.setattr("agent.secret_scope.get_secret", lambda name, default=None: "t-1")
+
+    class QuietBridge:
+        def __init__(self, cfg, handle, *, session_id):
+            pass
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("lumberroom_hermes.bridge.Bridge", QuietBridge)
+
+    from lumberroom_hermes.importer import ImportReport
+
+    monkeypatch.setattr(
+        "lumberroom_hermes.importer.import_builtin",
+        lambda bridge, home, *, profile, dry_run: ImportReport(
+            run_id="r-1", posted=1, proposals_new=1, proposals_reinforced=0, refused=0, blocked=0))
+
+    rc = lumberroom_command(parser().parse_args(["import-builtin"]))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert ("review with: lumberroom ingest list --state proposed, "
+            "or the queue in the lumberroom.cloud console.") in out
+    assert "ingest review" not in out
+
+
 def test_dreaming_review_reports_unknown_when_the_engine_never_answered():
     from lumberroom_hermes.cli import _dreaming_review_status
     from lumberroom_hermes.config import parse

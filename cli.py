@@ -256,5 +256,6 @@ def _import_builtin(args: Any) -> int:
     print(f"entries seen: {len(entries)}")
     print(f"proposals new: {report.proposals_new}")
     print(f"proposals reinforced: {report.proposals_reinforced}")
-    print("review with: lumberroom ingest review")
+    print("review with: lumberroom ingest list --state proposed, "
+          "or the queue in the lumberroom.cloud console.")
     return 0
