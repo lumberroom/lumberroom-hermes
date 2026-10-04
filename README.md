@@ -8,6 +8,10 @@ through the same tools; the plugin carries no cloud-specific code path (spec
 [`docs/spec.md`](docs/spec.md) decision 4, `config.py`,
 `provider.py`, `bridge.py`).
 
+[![Hermes Agent memory plugin: share memory with Claude Code](https://i.ytimg.com/vi/jsFzAZhPc94/maxresdefault.jpg)](https://youtu.be/jsFzAZhPc94)
+
+More videos: [Lumberroom playlist](https://www.youtube.com/playlist?list=PLICXFDm9bubU)
+
 ## What it does
 
 - **Recall on every turn.** The provider calls `prefetch` before each non-trivial turn. The first
