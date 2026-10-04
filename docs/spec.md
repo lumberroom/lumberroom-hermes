@@ -541,7 +541,9 @@ There is no local write buffer. A buffer would be a second durable store and wou
 3. `POST /admin/ingest/runs/{id}/close` with `entries_seen`, `proposals_new` and
    `proposals_reinforced`.
 4. Print the counts from the post report (`ENG/src/services/ingest.rs:145-152`) and the review
-   command: `lumberroom ingest review`, or the console queue.
+   command: `lumberroom ingest list --state proposed`, or the console queue. The list table shows
+   8-character short ids, and `lumberroom ingest approve <id>...` needs full UUIDs (copy them from
+   `lumberroom ingest list --state proposed --json`) or `lumberroom ingest approve --run <run-id>`.
 
 A 403 means the credential lacks `mayIngest`. The command prints the grant change (an
 `AUTH_TOKENS` `"mayIngest":true`, or a `full` consent) and exits 2. `--dry-run` prints the entries

@@ -121,6 +121,11 @@ outside `cli`, `tui`, `desktop`, `acp`, `cron`, and a number outside its range.
 (`importer.py`). A 403 means the credential lacks `mayIngest`; the command names the fix and exits 2.
 `--dry-run` prints the entries and namespaces and posts nothing.
 
+To review the proposals, run `lumberroom ingest list --state proposed` (or use the queue in the
+lumberroom.cloud console), then `lumberroom ingest approve <id>...`. The list table shows 8-character
+short ids, and `approve` needs full UUIDs: copy them from `lumberroom ingest list --state proposed --json`,
+or approve a whole import with `lumberroom ingest approve --run <run-id>`.
+
 ## The owner gate
 
 The digest is the owner's whole readable store, so only the owner's turns reach it. The gate runs
