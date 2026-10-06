@@ -34,7 +34,7 @@ Engine = "https://github.com/lumberroom/lumberroom"
 only-include = [
   "__init__.py", "_version.py", "auth.py", "bridge.py", "cli.py", "config.py", "gate.py", "importer.py",
   "plugin.yaml", "provider.py", "recall.py", "schemas.py", "tokens.py", "tools_snapshot.json",
-  "wizard.py",
+  "wizard.py", "skills/lr-review/SKILL.md",
 ]
 sources = { "" = "lumberroom_hermes" }
 

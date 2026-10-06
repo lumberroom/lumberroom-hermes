@@ -358,6 +358,44 @@ def test_review_tools_stay_hidden_with_the_setting_off(config_yaml, hermes_home)
     assert not {"review_queue", "review_decide"} & names
 
 
+def test_the_prompt_names_the_lr_review_skill_only_when_the_review_tools_are_on_offer(config_yaml, hermes_home):
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=True)
+    on, _ = make(FakeBridge())
+    init(on, hermes_home)
+    assert "lumberroom:lr-review" in on.system_prompt_block()
+    config_yaml(base_url="https://mcp.lumberroom.cloud", dreaming_review=False)
+    off, _ = make(FakeBridge())
+    init(off, hermes_home)
+    assert "lr-review" not in off.system_prompt_block()
+
+
+def test_register_adds_the_lr_review_skill_when_the_context_offers_register_skill():
+    import lumberroom_hermes
+
+    class Ctx:
+        def __init__(self):
+            self.providers, self.skills = [], []
+
+        def register_memory_provider(self, provider):
+            self.providers.append(provider)
+
+        def register_skill(self, name, path, description=""):
+            self.skills.append((name, path))
+
+    ctx = Ctx()
+    lumberroom_hermes.register(ctx)
+    [(name, path)] = ctx.skills
+    assert name == "lr-review" and path.read_text().startswith("---\nname: lr-review\n")
+
+    class ProviderOnlyCtx:
+        def register_memory_provider(self, provider):
+            self.provider = provider
+
+    bare = ProviderOnlyCtx()
+    lumberroom_hermes.register(bare)
+    assert bare.provider is not None
+
+
 def test_review_tools_stay_hidden_on_a_self_hosted_base_url_with_the_setting_on(config_yaml, hermes_home):
     config_yaml(base_url="http://fake.lumberroom.test", dreaming_review=True)
     p, _ = make(FakeBridge())

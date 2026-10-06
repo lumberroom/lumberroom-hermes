@@ -26,7 +26,9 @@ through the same tools; the plugin carries no cloud-specific code path (spec
   dreaming proposals; the server's own tool descriptions tell it to work the queue only when the
   person asks. Off by default. Setup asks for it only on the hosted path, and a self-hosted engine
   never sees the two tools even if the key is set by hand (`config.py:REVIEW_TOOLS`,
-  `provider.py:_ensure_candidate_tools`).
+  `provider.py:_ensure_candidate_tools`). The plugin registers the skill `lumberroom:lr-review`,
+  which tells the model how to work the queue, and the memory block names it while the two tools
+  are on.
 
 ## Install
 
