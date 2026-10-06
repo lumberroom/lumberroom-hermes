@@ -5,6 +5,8 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-10-06
+
 ### Added
 
 - Registers the `lumberroom:lr-review` skill for working the dreaming review queue.
