@@ -8,6 +8,10 @@ through the same tools; the plugin carries no cloud-specific code path (spec
 [`docs/spec.md`](docs/spec.md) decision 4, `config.py`,
 `provider.py`, `bridge.py`).
 
+[![Hermes Agent memory plugin: share memory with Claude Code](https://i.ytimg.com/vi/jsFzAZhPc94/maxresdefault.jpg)](https://youtu.be/jsFzAZhPc94)
+
+More videos: [Lumberroom playlist](https://www.youtube.com/playlist?list=PLICXFDm9bubU)
+
 ## What it does
 
 - **Recall on every turn.** The provider calls `prefetch` before each non-trivial turn. The first
@@ -122,6 +126,11 @@ outside `cli`, `tui`, `desktop`, `acp`, `cron`, and a number outside its range.
 `file_path#entry_uuid`), and never auto-approves: every proposal's speaker is `main_model`
 (`importer.py`). A 403 means the credential lacks `mayIngest`; the command names the fix and exits 2.
 `--dry-run` prints the entries and namespaces and posts nothing.
+
+To review the proposals, run `lumberroom ingest list --state proposed` (or use the queue in the
+lumberroom.cloud console), then `lumberroom ingest approve <id>...`. The list table shows 8-character
+short ids, and `approve` needs full UUIDs: copy them from `lumberroom ingest list --state proposed --json`,
+or approve a whole import with `lumberroom ingest approve --run <run-id>`.
 
 ## The owner gate
 

@@ -9,6 +9,12 @@ semantic versioning.
 
 - Registers the `lumberroom:lr-review` skill for working the dreaming review queue.
 
+### Fixed
+
+- **`import-builtin` no longer points at `lumberroom ingest review`, which is not a subcommand.** The
+  hint, the README and the spec now name `lumberroom ingest list --state proposed` and
+  `lumberroom ingest approve`.
+
 ## [1.0.2] - 2026-09-26
 
 ### Fixed
