@@ -19,3 +19,16 @@ def register(ctx) -> None:
     from .provider import LumberroomProvider
 
     ctx.register_memory_provider(LumberroomProvider())
+
+    # The memory-provider loader hands over a context without register_skill, so the skill is
+    # registered only where the general plugin loader is the caller. The text is a copy of the
+    # engine's skills/lr-review/SKILL.md, kept identical by the engine's scripts/sync-skills.sh.
+    register_skill = getattr(ctx, "register_skill", None)
+    if register_skill is not None:
+        from pathlib import Path
+
+        register_skill(
+            "lr-review",
+            Path(__file__).parent / "skills" / "lr-review" / "SKILL.md",
+            "Work the lumberroom review queue: dreaming proposals, conflicts, duplicates, stale facts.",
+        )

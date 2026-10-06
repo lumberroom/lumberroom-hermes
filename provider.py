@@ -241,6 +241,10 @@ class LumberroomProvider(MemoryProvider):
         lines.append("Lumberroom is the durable memory here. Record durable facts with memory_write.")
         if self._builtin_off:
             lines.append("The built-in MEMORY.md and USER.md are off.")
+        # Hermes keeps plugin skills out of <available_skills>, so the model learns of this one here,
+        # and only when the review tools are on offer.
+        if any(t["name"] == "review_decide" for t in self._candidate_tools):
+            lines.append("To work the review queue, load the skill lumberroom:lr-review first.")
         return "\n".join(lines)
 
     # -- turn tracking and gate ---------------------------------------------------
