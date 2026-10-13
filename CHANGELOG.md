@@ -5,6 +5,12 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-10-13
+
+### Changed
+
+- `lr-review` follows the engine's queue paging. `review_queue` over MCP returns the service default of up to 50 items per source, so a large queue is worked one source at a time, with `source` narrowed and `offset` moved inside it. The skill reads every page of a source before it splits that source across workers. Rows no longer carry read counters, and fact text arrives fenced in the structured copy.
+
 ## [1.0.4] - 2026-10-06
 
 ### Changed
