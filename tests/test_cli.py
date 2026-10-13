@@ -103,7 +103,7 @@ def test_status_reports_the_server_version_when_reachable(monkeypatch, hermes_ho
     rc = run_live_check(cfg, str(hermes_home), client_factory=fake_engine.client_factory)
 
     assert rc == 0
-    assert "server version: 3.2.0" in capsys.readouterr().out
+    assert "server version: 3.5.1" in capsys.readouterr().out
 
 
 def test_status_json_mode_carries_the_server_version_and_the_error(monkeypatch, hermes_home, fake_engine, capsys):
@@ -113,7 +113,7 @@ def test_status_json_mode_carries_the_server_version_and_the_error(monkeypatch, 
     run_live_check(cfg, str(hermes_home), as_json=True, client_factory=fake_engine.client_factory)
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["server_version"] == "3.2.0" and payload["error"] is None
+    assert payload["server_version"] == "3.5.1" and payload["error"] is None
 
 
 def test_import_builtin_prints_a_message_and_exits_one_when_the_token_is_unset(monkeypatch, hermes_home, capsys):
