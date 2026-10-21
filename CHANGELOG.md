@@ -5,6 +5,16 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- **The digest follows the request.** The first non-trivial turn after init, a reset or a
+  compression sends its message to `context_bootstrap` as `query`, stripped and clipped to 1,000
+  characters, when it runs 12 characters or more. An engine with
+  [decision 0034](https://github.com/lumberroom/lumberroom/blob/main/docs/decisions/0034-the-digest-leads-with-the-project.md)
+  adds the facts related to it and orders the profile by it. An older engine ignores the argument,
+  and so does lumberroom.cloud until it takes 0034. If a server refuses it, the digest goes out
+  without `query` on the next turn. `digest_query: false` turns it off.
+
 ## [1.0.5] - 2026-10-13
 
 ### Changed

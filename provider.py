@@ -85,6 +85,9 @@ class LumberroomProvider(MemoryProvider):
         self._told_login_this_session = False
 
         self._digest_armed = False
+        # True after a server answered a queried context_bootstrap with a tool error. The next digest
+        # goes without query; a reset, or a query-less digest that fails too, turns it back off.
+        self._digest_query_refused = False
         self._injected_ids = recall.InjectedIds()
         self._breaker = recall.Breaker(clock=clock)
         self._recall_status: RecallStatus | None = None
@@ -308,8 +311,13 @@ class LumberroomProvider(MemoryProvider):
         project = self._project()
         calls: list[tuple[str, dict[str, Any]]] = []
         send_digest = self._cfg.digest and self._digest_armed
+        digest_args: dict[str, Any] = {"project": project} if project else {}
+        if send_digest and self._cfg.digest_query and not self._digest_query_refused:
+            digest_query = recall.bootstrap_query(query)
+            if digest_query:
+                digest_args["query"] = digest_query
         if send_digest:
-            calls.append(("context_bootstrap", {"project": project} if project else {}))
+            calls.append(("context_bootstrap", digest_args))
         search_args: dict[str, Any] = {"query": recall.clip_query(query), "limit": self._cfg.recall_limit}
         if project:
             search_args["project"] = project
@@ -332,6 +340,16 @@ class LumberroomProvider(MemoryProvider):
                 digest_text = recall.format_digest(text, self._cfg.digest_max_chars)
                 # Every return below carries digest_text, so this turn delivers it.
                 self._digest_armed = False
+            elif "query" in digest_args:
+                # rmcp answers an argument it cannot parse with an isError result, so a server that
+                # refuses query lands here with the session intact. The digest stays armed and goes
+                # out without query on the next digest turn.
+                self._digest_query_refused = True
+                logger.warning("lumberroom: context_bootstrap refused a query (%s); the next digest "
+                               "goes without query", results[idx - 1].error)
+            else:
+                # A query-less digest failed as well, so the earlier error was not about query.
+                self._digest_query_refused = False
             # a tool error leaves the digest unset and armed, to retry on the next turn
 
         search_result = results[idx]
@@ -391,6 +409,10 @@ class LumberroomProvider(MemoryProvider):
         # The summary the compressor writes may drop an earlier digest, so it goes out again.
         if reset or kwargs.get("reason") == "compression":
             self._digest_armed = True
+        # A new conversation tries the query again, so one transient error cannot switch it off for
+        # a gateway's whole life.
+        if reset:
+            self._digest_query_refused = False
 
     # -- tool calls -----------------------------------------------------------
 

@@ -35,7 +35,8 @@ class FakeBridge:
         self.calls.append((tool, args, invocation, timeout))
         if self.fail:
             return CallResult(self.fail, None, "", "boom")
-        return self.answers[tool]
+        answer = self.answers[tool]
+        return answer(args) if callable(answer) else answer
 
     def call_many(self, calls, *, invocation, timeout):
         return [self.call(t, a, invocation=invocation, timeout=timeout) for t, a in calls]
@@ -456,3 +457,113 @@ def test_review_tools_stay_hidden_and_refused_when_no_live_list_came_back(config
     out = json.loads(p.handle_tool_call("review_queue", {}))
     assert "does not expose" in out["error"]
     assert not any(c[0] == "review_queue" for c in bridge.calls)
+
+
+def _refuses_query(args):
+    if "query" in args:
+        return CallResult("tool_error", None, "", "failed to deserialize parameters: unknown field `query`")
+    return OK({"text": "- digest line"})
+
+
+def _bootstrap_args(bridge):
+    return [a for t, a, *_ in bridge.calls if t == "context_bootstrap"]
+
+
+def test_the_first_prefetch_sends_the_turn_as_the_bootstrap_query(config_yaml, hermes_home):
+    config_yaml(project="lumberroom")
+    bridge = FakeBridge()
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    p.prefetch("  what do I prefer for plans?  ")
+    assert _bootstrap_args(bridge) == [{"project": "lumberroom", "query": "what do I prefer for plans?"}]
+
+
+def test_a_prompt_under_twelve_characters_keeps_the_bootstrap_query_less(config_yaml, hermes_home):
+    bridge = FakeBridge()
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    assert "- digest line" in p.prefetch("fix the bug")
+    assert _bootstrap_args(bridge) == [{}]
+
+
+def test_digest_query_off_sends_the_bootstrap_without_a_query(config_yaml, hermes_home):
+    config_yaml(digest_query=False)
+    bridge = FakeBridge()
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    p.prefetch("what do I prefer for plans")
+    assert _bootstrap_args(bridge) == [{}]
+
+
+def test_a_refused_query_keeps_the_hits_and_sends_the_digest_without_it_next_turn(config_yaml, hermes_home):
+    bridge = FakeBridge()
+    bridge.answers["context_bootstrap"] = _refuses_query
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    first = p.prefetch("what do I prefer for plans")
+    assert "Likes terse plans." in first
+    assert "digest line" not in first and UNREACHABLE_LINE not in first
+    assert p._breaker._consecutive_failures == 0
+    assert p._digest_armed is True
+    second = p.prefetch("which bucket holds staging builds")
+    assert "- digest line" in second
+    assert _bootstrap_args(bridge) == [{"query": "what do I prefer for plans"}, {}]
+
+
+def test_after_a_confirmed_refusal_a_compression_rearm_goes_out_query_less(config_yaml, hermes_home, caplog):
+    bridge = FakeBridge()
+    bridge.answers["context_bootstrap"] = _refuses_query
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    with caplog.at_level("INFO", logger="lumberroom_hermes.provider"):
+        p.prefetch("what do I prefer for plans")
+    assert "without query" in caplog.text
+    p.prefetch("which bucket holds staging builds")
+    bridge.calls.clear()
+    p.on_session_switch("s-2", reason="compression")
+    assert "- digest line" in p.prefetch("where do the release notes live")
+    assert _bootstrap_args(bridge) == [{}]
+
+
+def test_a_query_less_failure_after_a_refusal_turns_the_query_back_on(config_yaml, hermes_home):
+    bridge = FakeBridge()
+    bridge.answers["context_bootstrap"] = CallResult("tool_error", None, "", "boom")
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    p.prefetch("what do I prefer for plans")
+    p.prefetch("which bucket holds staging builds")
+    p.prefetch("where do the release notes live")
+    assert _bootstrap_args(bridge) == [
+        {"query": "what do I prefer for plans"}, {}, {"query": "where do the release notes live"}]
+
+
+def test_a_reset_sends_the_next_turns_message_as_the_query(config_yaml, hermes_home):
+    bridge = FakeBridge()
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    p.prefetch("what do I prefer for plans")
+    p.on_session_switch("s-2", reset=True)
+    p.prefetch("which bucket holds staging builds")
+    assert [a.get("query") for a in _bootstrap_args(bridge)] == [
+        "what do I prefer for plans", "which bucket holds staging builds"]
+
+
+def test_a_reset_lets_the_query_go_out_again_after_a_refusal(config_yaml, hermes_home):
+    bridge = FakeBridge()
+    bridge.answers["context_bootstrap"] = _refuses_query
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    p.prefetch("what do I prefer for plans")
+    p.prefetch("which bucket holds staging builds")
+    p.on_session_switch("s-2", reset=True)
+    p.prefetch("where do the release notes live")
+    assert _bootstrap_args(bridge)[-1] == {"query": "where do the release notes live"}
+
+
+def test_a_query_less_bootstrap_error_is_not_retried_in_the_same_turn(config_yaml, hermes_home):
+    bridge = FakeBridge()
+    bridge.answers["context_bootstrap"] = CallResult("tool_error", None, "", "boom")
+    p, _ = make(bridge)
+    init(p, hermes_home)
+    p.prefetch("fix the bug")
+    assert _bootstrap_args(bridge) == [{}]

@@ -1,5 +1,7 @@
-from lumberroom_hermes.recall import (DIGEST_HEADING, HITS_HEADING, Breaker, InjectedIds, clip_query,
-                                      compose, format_digest, format_hit, format_hits)
+import pytest
+
+from lumberroom_hermes.recall import (DIGEST_HEADING, HITS_HEADING, Breaker, InjectedIds, bootstrap_query,
+                                      clip_query, compose, format_digest, format_hit, format_hits)
 
 HIT = {"id": "3f0c9a4e-0000-4000-8000-000000000001", "namespace": "user:me",
        "content": "Prefers draft PRs\nfor engine changes.", "source": "Codex", "occurred_at": "2026-06-04T00:00:00Z"}
@@ -53,3 +55,16 @@ def test_the_breaker_opens_after_three_failures_and_closes_after_the_cooldown():
     assert b.allow() is True
     b.record_success()
     assert b.record_failure() is True
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("", None),
+    ("   ", None),
+    ("fix the bug", None),
+    ("   fix the bug   ", None),
+    ("fix the bugs", "fix the bugs"),
+    ("  what do I prefer  ", "what do I prefer"),
+    ("x" * 1200, "x" * 1000),
+])
+def test_bootstrap_query_strips_drops_short_text_and_clips(text, expected):
+    assert bootstrap_query(text) == expected

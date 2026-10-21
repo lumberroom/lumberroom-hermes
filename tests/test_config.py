@@ -19,6 +19,7 @@ def test_five_spellings_of_one_engine_give_one_mcp_url(raw):
     ({"base_url": "http://h", "auth": "token", "prefetch_timeout_s": 8.0}, "prefetch_timeout_s"),
     ({"base_url": "http://h", "auth": "token", "owner_user_ids": ["123"]}, "owner_user_ids"),
     ({"base_url": "http://h", "auth": "token", "recal": True}, "recal"),
+    ({"base_url": "http://h", "auth": "token", "digest_query": "yes"}, "digest_query"),
 ])
 def test_a_bad_block_names_the_key(block, key):
     with pytest.raises(ConfigError, match=key):
@@ -66,3 +67,8 @@ def test_dreaming_review_is_off_unless_the_owner_turns_it_on():
 def test_a_base_url_that_hides_its_real_host_is_refused(raw):
     with pytest.raises(ConfigError, match="base_url"):
         parse({"base_url": raw})
+
+
+def test_digest_query_defaults_on_and_can_be_turned_off():
+    assert parse({"base_url": "http://h", "auth": "oauth"}).digest_query is True
+    assert parse({"base_url": "http://h", "auth": "oauth", "digest_query": False}).digest_query is False
