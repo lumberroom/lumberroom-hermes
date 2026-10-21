@@ -16,7 +16,11 @@ More videos: [Lumberroom playlist](https://www.youtube.com/playlist?list=PLICXFD
 
 - **Recall on every turn.** The provider calls `prefetch` before each non-trivial turn. The first
   such turn after init, a reset or a compression carries the `context_bootstrap` digest; every turn
-  carries `memory_search` hits for the message (`provider.py:281-343`, spec §1, §9).
+  carries `memory_search` hits for the message (`provider.py:prefetch`, spec §1, §9). On the digest
+  turn the message also goes to `context_bootstrap` as `query`, stripped and clipped to 1,000
+  characters, when it runs 12 characters or more. An engine with
+  [decision 0034](https://github.com/lumberroom/lumberroom/blob/main/docs/decisions/0034-the-digest-leads-with-the-project.md)
+  adds the facts related to it; an older engine ignores it.
 - **The engine's own tools.** The model sees `memory_search`, `memory_write`, `registry_get` and,
   when the grant carries `mayDelete`, `memory_forget`, with the live descriptions and schemas the
   engine serves from `tools/list` (`provider.py:210-221`, `schemas.py`).
@@ -91,6 +95,7 @@ reads the right profile's token (`config.py`, spec §4).
 | `project` | `auto` | `auto`: the git root above `cwd` when Hermes passed one, else no project. `none`: never send one. Anything else: a slug or path sent as given. |
 | `recall` | `true` | Master switch for `prefetch`. |
 | `digest` | `true` | Inject `context_bootstrap` on the first non-trivial turn after init, a reset or a compression. |
+| `digest_query` | `true` | Send the digest turn's message to `context_bootstrap` as `query` when it runs 12 characters or more after stripping, clipped to 1,000. If a server answers that call with an error, the turn carries its hits without a digest and the next digest turn sends the digest without `query`. The query comes back after a reset, or at once if the query-less digest fails too. `false` sends the digest without one. |
 | `dreaming_review` | `false` | Lets the model call `review_queue` and `review_decide` on lumberroom.cloud's dreaming proposals; the server's own tool descriptions tell it to touch the queue only when asked. Reaches the model only when this is `true`, the engine is lumberroom.cloud, and the live `tools/list` offers both tools. `hermes lumberroom status` reports `off` with one of three reasons: `setting off`, `not lumberroom.cloud`, or `the server's grant lacks the tools`. Setup asks for it only on the hosted path. |
 | `digest_max_chars` | `6000` | Client-side cap, 0 to 50,000. Matches the engine default `BOOTSTRAP_MAX_CHARS`. |
 | `recall_limit` | `4` | `memory_search` limit per turn, 1 to 20. |
@@ -160,6 +165,7 @@ cron job posts to. Remove `cron` from `local_platforms` to turn that off.
 | engine down or connect refused | first failure of an outage: the unreachable line; then `""`; breaker opens after 3 consecutive failures for 60 seconds (design targets, `recall.py:Breaker`) | `{"error": "lumberroom unreachable at <host>: <reason>. Nothing was stored."}` for `memory_write`; `Nothing was deleted.` for `memory_forget`; `No memory was read.` for the rest |
 | read timeout after the request left | `""` or the unreachable line, as above | `{"error": "lumberroom did not answer within <n>s. The call may have taken effect; search before retrying."}` |
 | engine returns a tool error | hits block omitted for that call, digest stays armed to retry | `{"error": "<engine text>"}` |
+| server refuses `context_bootstrap`'s `query` | an `isError` refusal: hits as usual, no digest that turn, the digest without `query` next turn. A JSON-RPC refusal also retires the hook session, so that turn can lose its hits and show the unreachable line; the next turn delivers both | n/a |
 | 401, token mode | `""` | `{"error": "lumberroom refused LUMBERROOM_HERMES_TOKEN (401). Check the token and its grant."}` |
 | OAuth, no token file, or a refresh the token endpoint refused (4xx) | the login line once per session | `{"error": "lumberroom is not logged in. Run hermes lumberroom login."}` |
 | OAuth, a due refresh failed to connect, and the stored access token is already expired | treated as unreachable, as above | treated as unreachable, as above |

@@ -23,6 +23,20 @@ def clip_query(query: str) -> str:
     return query[:QUERY_MAX_CHARS]
 
 
+# Matches the 12-character floor the Claude Code plugin uses for its digest query, a default here
+# until the owner confirms it (docs/spec.md section 2). A shorter request carries too little to rank
+# the digest by, so the digest goes out without one.
+DIGEST_QUERY_MIN_CHARS = 12
+
+
+def bootstrap_query(text: str) -> str | None:
+    """The turn's message as context_bootstrap's query: stripped, None under 12 characters, clipped."""
+    stripped = (text or "").strip()
+    if len(stripped) < DIGEST_QUERY_MIN_CHARS:
+        return None
+    return clip_query(stripped)
+
+
 def format_digest(text: str, max_chars: int) -> str:
     """Heading plus text cut at the last newline within max_chars; "" for empty text or max_chars 0."""
     if not text or max_chars <= 0:

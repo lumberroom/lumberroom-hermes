@@ -24,3 +24,10 @@ def test_the_cache_round_trips_and_a_broken_cache_reads_as_none(tmp_path):
     assert read_cache(str(tmp_path))["tools"] == [{"name": "memory_write"}]
     (tmp_path / "lumberroom" / "tools_cache.json").write_text("{")
     assert read_cache(str(tmp_path)) is None
+
+
+def test_the_snapshot_context_bootstrap_takes_a_query():
+    snapshot = load_snapshot()
+    [tool] = [t for t in snapshot["tools"] if t["name"] == "context_bootstrap"]
+    assert tool["inputSchema"]["properties"]["query"]["type"] == ["string", "null"]
+    assert "sent as query" in snapshot["instructions"]

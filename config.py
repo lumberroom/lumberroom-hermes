@@ -30,7 +30,7 @@ _FLOAT_RANGES = {
     "tool_timeout_s": (1.0, 120.0),
     "connect_timeout_s": (0.5, 30.0),
 }
-_BOOLS = ("recall", "digest", "dreaming_review")
+_BOOLS = ("recall", "digest", "digest_query", "dreaming_review")
 _LISTS = ("tools", "owner_user_ids", "local_platforms")
 _KNOWN = {"base_url", "auth", "project", *_INT_RANGES, *_FLOAT_RANGES, *_BOOLS, *_LISTS}
 
@@ -46,6 +46,8 @@ class LumberroomConfig:
     project: str = "auto"
     recall: bool = True
     digest: bool = True
+    # Sends the turn's message as context_bootstrap's query. An engine before decision 0034 ignores it.
+    digest_query: bool = True
     # The owner's ruling of 25 September 2026: review_queue and review_decide reach the model only
     # when this is on, the engine is lumberroom.cloud, and the live tools/list offers them. The OSS
     # engine carries the same two tools for cleanup and ingest proposals; they stay off there.

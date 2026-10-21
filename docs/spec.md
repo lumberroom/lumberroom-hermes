@@ -22,7 +22,8 @@ A Hermes user who selects `memory.provider: lumberroom` gets three things:
 
 - **Recall on every turn.** Hermes calls the provider's `prefetch` before each non-trivial turn.
   The first such turn carries the `context_bootstrap` digest; every turn carries `memory_search`
-  hits for the user's message. Hermes fences the text in `<memory-context>` and appends it to the
+  hits for the user's message. The digest turn sends that message to `context_bootstrap` as `query`
+  too (section 9). Hermes fences the text in `<memory-context>` and appends it to the
   user message (`HERMES/agent/memory_manager.py:317-333`, `agent/turn_context.py:853-880`).
 - **The engine's own tools.** The model sees `memory_search`, `memory_write`, `registry_get` and,
   when the grant carries `mayDelete`, `memory_forget`, with the descriptions and schemas the engine
@@ -79,6 +80,20 @@ message itself sends the operator there. This spec therefore lets `auth: token` 
 `base_url`, and hosted setup offers browser sign-in first and an `lr_` token second. The plugin code
 is identical either way; only the setup picker changes. The owner confirmed this on 25 September
 2026 (decision 9, plan Q1).
+
+### Defaults not yet confirmed
+
+The owner ruled on 20 October 2026 that the digest takes the session's request as `query`
+([lumberroom/lumberroom](https://github.com/lumberroom/lumberroom) decision 0034). How this plugin
+applies it is a set of defaults the owner has not confirmed:
+
+- The message is stripped, left out under 12 characters, and clipped to 1,000.
+- A short first message sends the digest without a query and does not hold it back for a longer
+  one, because Hermes fetches the digest inside that turn.
+- A tool error on a queried digest leaves it armed, and the next digest turn sends it without
+  `query`. A reset, or a query-less digest that fails too, sends the query again.
+- The digest's related section and the hits block can carry the same fact on that turn; the digest
+  text has no ids to dedupe on.
 
 ## 3. Package layout
 
@@ -154,6 +169,7 @@ gateway reads the right profile (`HERMES/agent/secret_scope.py:200-228`).
 | `project` | `auto` | `auto`: the git root above `cwd` when Hermes passed one, else no project. `none`: never send one. Anything else: a slug or path sent as given. The engine reduces it to a slug (`ENG/src/domain/namespaces.rs:92-113`). |
 | `recall` | `true` | Master switch for `prefetch`. |
 | `digest` | `true` | Inject `context_bootstrap` on the first non-trivial turn after init, a reset or a compression. |
+| `digest_query` | `true` | Send the digest turn's message to `context_bootstrap` as `query` when it runs 12 characters or more after stripping, clipped to 1,000. If a server answers that call with an error, the turn carries its hits without a digest and the next digest turn sends the digest without `query`. The query comes back after a reset, or at once if the query-less digest fails too. `false` sends the digest without one. |
 | `dreaming_review` | `false` | Expose the server's `review_queue` and `review_decide`, so Hermes can list and act on lumberroom.cloud dreaming proposals. Takes effect only on a lumberroom.cloud `base_url`; section 7.1. |
 | `digest_max_chars` | `6000` | Client-side cap. Matches the engine default `BOOTSTRAP_MAX_CHARS` (`ENG/src/config.rs:863`). |
 | `recall_limit` | `4` | `memory_search` limit per turn, 1 to 20. |
@@ -343,7 +359,7 @@ failures, records a reason, and makes the reason visible in `prefetch`, in tool 
 | `get_tool_schemas()` after `initialize` | Gated or inert: `[]`, so Hermes exposes no lumberroom tool (`HERMES/agent/memory_manager.py:614-635`). Otherwise the candidate names that the live list also carries, with the live description and schema. Degraded: the candidate set. Never a name outside the candidate set. |
 | `system_prompt_block()` | Gated or inert: `""`. Otherwise the server instructions (live, else from the snapshot), then one line: "Lumberroom is the durable memory here. Record durable facts with memory_write." When both built-in flags are off it adds "The built-in MEMORY.md and USER.md are off." Static for the session. |
 | `on_turn_start(turn, message, **kw)` | Records `kw.get("author_id")` for this turn. Hermes sends `None` when the transport names no author (`HERMES/agent/memory_provider.py:154-157`). Section 8 reads it. |
-| `prefetch(query, *, session_id)` | Section 9. |
+| `prefetch(query, *, session_id)` | Section 9. The digest turn sends `query` to `context_bootstrap` as well. |
 | `recall_status()` | `RecallStatus("lumberroom", n)` where `n` counts hits the last prefetch injected; `None` when it injected nothing. |
 | `queue_prefetch` | Not implemented. |
 | `sync_turn(...)` | Writes nothing and calls nothing. In a primary, allowed session it counts turns; at `review_interval` it marks the nudge due and resets. |
@@ -452,11 +468,16 @@ Order of checks, each returning early:
 
 Then, on the hook session, bounded by `prefetch_timeout_s` in total:
 
-- digest armed: `context_bootstrap {project}` and `memory_search {query, limit, project}` in
-  parallel;
+- digest armed: `context_bootstrap {project, query}` and `memory_search {query, limit, project}` in
+  parallel. The bootstrap `query` is the message stripped, left out under 12 characters, clipped to
+  1,000, and left out entirely with `digest_query: false` or after a server refused one;
 - otherwise `memory_search` alone.
 
-The query is the user message clipped to 1000 characters (design target).
+The query is the user message clipped to 1000 characters (design target). A tool error on a queried
+`context_bootstrap` leaves the digest armed and turns `query` off for the next digest turn. A reset,
+or a tool error on that query-less digest, turns it back on. An rmcp server refuses an unparseable
+argument with an `isError` result, which leaves the hook session open. A JSON-RPC error retires the
+hook session (`bridge.py:375-379`) and takes the `memory_search` in flight beside it.
 
 **Output, plain markdown.** The host adds the fence and the system note
 (`HERMES/agent/memory_manager.py:317-333`), so the plugin never writes `<memory-context>`.
@@ -505,6 +526,7 @@ breaker: the model asked for them.
 | engine down or connect refused | first failure of an outage: the unreachable line; then `""`; breaker after 3 | `{"error": "lumberroom unreachable at <host>: <reason>. Nothing was stored."}` for `memory_write`; `Nothing was deleted.` for `memory_forget`; `No memory was read.` for the rest |
 | read timeout after the request left | `""` or the unreachable line, as above | `{"error": "lumberroom did not answer within <n>s. The call may have taken effect; search before retrying."}` |
 | engine returns a tool error | hits block omitted for that call | `{"error": "<engine text>"}` |
+| server refuses `context_bootstrap`'s `query` | an `isError` refusal: hits as usual, no digest that turn, the digest without `query` next turn. A JSON-RPC refusal also retires the hook session, so that turn can lose its hits and show the unreachable line; the next turn delivers both. `query` returns after a reset | n/a |
 | 401, token mode | `""` | `{"error": "lumberroom refused LUMBERROOM_HERMES_TOKEN (401). Check the token and its grant."}` |
 | 401, OAuth, refresh fails or no token file | the login line once per session | `{"error": "lumberroom is not logged in. Run hermes lumberroom login."}` |
 | OAuth, cold process, access token expired, refresh token live | the fence refreshes; the call proceeds | same |
