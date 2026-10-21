@@ -43,7 +43,7 @@ More videos: [Lumberroom playlist](https://www.youtube.com/playlist?list=PLICXFD
 From a release, into the directory Hermes loads providers from:
 
 ```bash
-git clone --depth 1 --branch v1.0.5 https://github.com/lumberroom/lumberroom-hermes \
+git clone --depth 1 --branch v1.1.0 https://github.com/lumberroom/lumberroom-hermes \
   ~/.hermes/plugins/lumberroom
 hermes memory setup lumberroom
 ```
