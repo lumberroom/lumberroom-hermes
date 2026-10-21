@@ -5,6 +5,8 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-21
+
 ### Added
 
 - **The digest follows the request.** The first non-trivial turn after init, a reset or a
