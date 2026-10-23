@@ -4,7 +4,7 @@
 #
 #   POSTGRES_PASSWORD=... ./scripts/hermes-plugin-test.sh
 #   ./scripts/hermes-plugin-test.sh --hermes-src ~/work/open-source/hermes-agent --keep
-#   ./scripts/hermes-plugin-test.sh --engine-src ~/work/cbrspn-tech/lumberroom   default ../lumberroom
+#   ./scripts/hermes-plugin-test.sh --engine-src ~/src/lumberroom   default ../lumberroom
 #   ./scripts/hermes-plugin-test.sh --capture     rewrite the tools snapshot and the test transcript, then exit
 #
 # Two scratch servers, never 8787: token mode on 8796 against lumberroom_hermes_plugin_test, OAuth

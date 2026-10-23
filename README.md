@@ -4,9 +4,8 @@ lumberroom as Hermes's memory provider. With no `memory.lumberroom` block, or a 
 `base_url`, the plugin talks to lumberroom.cloud with browser sign-in. Setting `base_url` points it
 at a self-hosted OSS engine instead, running the same code with a static token or OAuth. A
 cloud-only capability, such as dreaming consolidation, runs on the server and reaches the plugin
-through the same tools; the plugin carries no cloud-specific code path (spec
-[`docs/spec.md`](docs/spec.md) decision 4, `config.py`,
-`provider.py`, `bridge.py`).
+through the same tools; the plugin carries no cloud-specific code path (`config.py`, `provider.py`,
+`bridge.py`).
 
 [![Hermes Agent memory plugin: share memory with Claude Code](https://i.ytimg.com/vi/jsFzAZhPc94/maxresdefault.jpg)](https://youtu.be/jsFzAZhPc94)
 
@@ -230,6 +229,4 @@ It needs the engine's `lumberroom-server:0.4.0` image built from that checkout
 database. `--capture` rewrites `tools_snapshot.json` and the test transcript from the engine it
 starts, which is how the plugin picks up a change to the engine's tools.
 
-Implemented against [`docs/spec.md`](docs/spec.md); read that spec for the transport, the OAuth
-token-refresh fence, and the full hook-by-hook contract. [`docs/plan.md`](docs/plan.md) is the
-build plan, written when the plugin lived at `client/hermes/` in the engine repository.
+The plugin first lived at `client/hermes/` in the engine repository.
