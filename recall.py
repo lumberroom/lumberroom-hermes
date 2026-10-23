@@ -24,7 +24,7 @@ def clip_query(query: str) -> str:
 
 
 # Matches the 12-character floor the Claude Code plugin uses for its digest query, a default here
-# until the owner confirms it (docs/spec.md section 2). A shorter request carries too little to rank
+# until the owner confirms it. A shorter request carries too little to rank
 # the digest by, so the digest goes out without one.
 DIGEST_QUERY_MIN_CHARS = 12
 
